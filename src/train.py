@@ -246,7 +246,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
 def parse_args():
   parser = argparse.ArgumentParser()
   parser.add_argument('task', choices=TASK_CLASSES.keys())
-  parser.add_argument('model', choices=['bow', 'cnn', 'lstm', 'decomp-attn', 'lstm-final-state'])
+  parser.add_argument('model', choices=['bow', 'cnn', 'lstm', 'decomp-attn', 'lstm-final-state', 'lstm-dp'])
   parser.add_argument('out_dir', help='Directory to store and load output')
   # Model
   parser.add_argument('--hidden-size', '-d', type=int, default=100)
@@ -266,6 +266,7 @@ def parse_args():
   parser.add_argument('--adv-num-tries', type=int, default=2)
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
+  parser.add_argument('--sub-num', type=int, default=None)
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
