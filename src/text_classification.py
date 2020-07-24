@@ -478,6 +478,24 @@ class ExhaustiveAdversary(Adversary):
         is_correct = []
         adv_exs = []
         for x, y in dataset.raw_data:
+            # First query the example itself
+            orig_pred, (orig_lb, orig_ub) = model.query(
+                x, dataset.vocab, device, return_bounds=True,
+                attack_surface=self.attack_surface)
+            cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
+            print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
+                orig_lb, orig_pred, orig_ub, cert_correct))
+            if orig_pred * (2 * y - 1) <= 0:
+                print('ORIGINAL PREDICTION WAS WRONG')
+                is_correct.append(0)
+                adv_exs.append(x)
+                continue
+            elif cert_correct:
+                print('CERTIFY CORRECT')
+                is_correct.append(1)
+                adv_exs.append([])
+                continue
+
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
             choices = [cur_swaps for w, cur_swaps in zip(words, swaps)]
@@ -486,7 +504,7 @@ class ExhaustiveAdversary(Adversary):
             for batch_x in self.DelDupSubWord(0, 0, 3, words, choices):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
-                cur_adv_exs = [all_raw[i][0] for i, p in enumerate(preds)
+                cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
                                if p * (2 * y - 1) <= 0]
                 if len(cur_adv_exs) > 0:
                     print(cur_adv_exs)
@@ -495,7 +513,7 @@ class ExhaustiveAdversary(Adversary):
                     break
 
             # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x,))
+            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
             is_correct.append(is_correct_single)
             if is_correct_single:
                 adv_exs.append([])
