@@ -6,6 +6,7 @@ import numpy as np
 import os
 import pickle
 import random
+import copy
 
 from nltk import word_tokenize
 import torch
@@ -33,22 +34,34 @@ class AdversarialModel(nn.Module):
         """Query the model on a Dataset.
 
         Args:
-          x: a string
+          x: a string or a list
           vocab: vocabulary
           device: torch device.
 
         Returns: list of logits of same length as |examples|.
         """
-        dataset = TextClassificationDataset.from_raw_data(
-            [(x, 0)], vocab, attack_surface=attack_surface)
-        data = dataset.get_loader(1)
+        if isinstance(x, str):
+            dataset = TextClassificationDataset.from_raw_data(
+                [(x, 0)], vocab, attack_surface=attack_surface)
+            data = dataset.get_loader(1)
+        else:
+            dataset = TextClassificationDataset.from_raw_data(
+                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface)
+            data = dataset.get_loader(len(x))
+
         with torch.no_grad():
             batch = data_util.dict_batch_to_device(next(iter(data)), device)
             logits = self.forward(batch, compute_bounds=return_bounds)
-            if return_bounds:
-                return logits.val[0].item(), (logits.lb[0].item(), logits.ub[0].item())
+            if isinstance(x, str):
+                if return_bounds:
+                    return logits.val[0].item(), (logits.lb[0].item(), logits.ub[0].item())
+                else:
+                    return logits[0].item()
             else:
-                return logits[0].item()
+                if return_bounds:
+                    return logits.val, (logits.lb, logits.ub)
+                else:
+                    return logits
 
 
 def attention_pool(x, mask, layer):
@@ -467,20 +480,72 @@ class ExhaustiveAdversary(Adversary):
         for x, y in dataset.raw_data:
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
-            choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
-            prod = 1
-            for c in choices:
-                prod *= len(c)
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, prod))
-            all_raw = [(' '.join(x_new), y) for x_new in itertools.product(*choices)]
-            cur_dataset = TextClassificationDataset.from_raw_data(all_raw, dataset.vocab)
-            preds = model.query(cur_dataset, device)
-            cur_adv_exs = [all_raw[i][0] for i, p in enumerate(preds)
-                           if p * (2 * y - 1) <= 0]
-            print(cur_adv_exs)
-            adv_exs.append(cur_adv_exs)
-            is_correct.append(int(len(cur_adv_exs) > 0))
+            choices = [cur_swaps for w, cur_swaps in zip(words, swaps)]
+
+            is_correct_single = True
+            for batch_x in self.DelDupSubWord(0, 0, 3, words, choices):
+                all_raw = [' '.join(x_new) for x_new in batch_x]
+                preds = model.query(all_raw, dataset.vocab, device)
+                cur_adv_exs = [all_raw[i][0] for i, p in enumerate(preds)
+                               if p * (2 * y - 1) <= 0]
+                if len(cur_adv_exs) > 0:
+                    print(cur_adv_exs)
+                    adv_exs.append(cur_adv_exs)
+                    is_correct_single = False
+                    break
+
+            # TODO: count the number
+            print('ExhaustiveAdversary: "%s" -> %d options' % (x,))
+            is_correct.append(is_correct_single)
+            if is_correct_single:
+                adv_exs.append([])
+
         return is_correct, adv_exs
+
+    def DelDupSubWord(self, a, b, c, x, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
+        end_pos = len(x)
+
+        valid_sub_poss = [i for i in range(end_pos) if len(choices[i]) > 0]
+        X = []
+        for sub in range(c, -1, -1):
+            for sub_poss in itertools.combinations(tuple(valid_sub_poss), sub):
+                sub_pos_strs = []
+                for sub_pos in sub_poss:
+                    sub_pos_strs.append(choices[sub_pos])
+                for sub_pos_str in itertools.product(*sub_pos_strs):
+                    x3 = copy.copy(x)
+                    for i, sub_pos in enumerate(sub_poss):
+                        x3[sub_pos] = sub_pos_str[i]
+                    valid_dup_poss = [i for i in range(end_pos) if i not in sub_poss]
+                    for dup in range(b, -1, -1):
+                        for dup_poss in itertools.combinations(tuple(valid_dup_poss), dup):
+                            valid_del_poss = [i for i in range(end_pos) if
+                                              (i not in dup_poss) and (i not in sub_poss) and x[i] in del_set]
+                            for delete in range(a, -1, -1):
+                                for del_poss in itertools.combinations(tuple(valid_del_poss), delete):
+                                    x2 = []
+                                    copy_point = 0
+                                    paste_point = 0
+                                    while copy_point < end_pos and paste_point < end_pos:
+                                        if copy_point in dup_poss:
+                                            x2.append(x3[copy_point])
+                                            x2.append(x3[copy_point])
+                                            paste_point += 2
+                                            copy_point += 1
+                                        elif copy_point in del_poss:
+                                            copy_point += 1
+                                        else:
+                                            x2.append(x3[copy_point])
+                                            paste_point += 1
+                                            copy_point += 1
+
+                                    X.append(x2)
+                                    if len(X) == batch_size:
+                                        yield X
+                                        X = []
+
+        if len(X) > 0:
+            yield X
 
 
 class GreedyAdversary(Adversary):
