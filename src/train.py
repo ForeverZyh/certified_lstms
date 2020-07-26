@@ -318,6 +318,7 @@ def parse_args():
   # Other
   parser.add_argument('--rng-seed', type=int, default=123456)
   parser.add_argument('--torch-seed', type=int, default=1234567)
+  parser.add_argument('--gpu-id', type=str, default=None)
 
   if len(sys.argv) == 1:
     parser.print_help()
@@ -326,6 +327,8 @@ def parse_args():
 
 
 def main():
+  if OPTS.gpu_id is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = OPTS.gpu_id
   random.seed(OPTS.rng_seed)
   np.random.seed(OPTS.rng_seed)
   torch.manual_seed(OPTS.torch_seed)
