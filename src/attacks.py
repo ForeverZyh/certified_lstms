@@ -30,6 +30,28 @@ class WordSubstitutionAttackSurface(AttackSurface):
         swaps.append([])
     return swaps
 
+class WordSubstitutionInsAttackSurface(AttackSurface):
+  def __init__(self, neighbors, sub_num):
+    self.neighbors = neighbors
+    self.sub_num = sub_num
+
+  @classmethod
+  def from_file(cls, neighbors_file, sub_num):
+    with open(neighbors_file) as f:
+      return cls(json.load(f), sub_num)
+
+  def get_swaps(self, words):
+    swaps = []
+    for i in range(len(words)):
+      if words[i] in self.neighbors:
+        swaps.append(self.neighbors[words[i]])
+      else:
+        swaps.append([])
+      for j in range(self.sub_num):
+        if i - j - 1 >= 0:
+          swaps[-1].append(words[i - j - 1])
+    return swaps
+
 class LMConstrainedAttackSurface(AttackSurface):
   """WordSubstitutionAttackSurface with language model constraint."""
   def __init__(self, neighbors, lm_scores, min_log_p_diff=DEFAULT_MAX_LOG_P_DIFF):

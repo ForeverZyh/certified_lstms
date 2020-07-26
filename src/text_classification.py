@@ -312,7 +312,7 @@ class LSTMDPModel(AdversarialModel):
     """
 
     def __init__(self, word_vec_size, hidden_size, word_mat, device, pool='max', dropout=0.2,
-                 no_wordvec_layer=False, sub_num=None):
+                 no_wordvec_layer=False, sub_num=None, use_ins=False):
         super(LSTMDPModel, self).__init__()
         assert sub_num is not None
         # TODO: to implement more discrete perturbation space
@@ -323,10 +323,10 @@ class LSTMDPModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, sub_num, bidirectional=True)
+            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, sub_num, bidirectional=True, use_ins=use_ins)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
-            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, sub_num, bidirectional=True)
+            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, sub_num, bidirectional=True, use_ins=use_ins)
         self.dropout = ibp.Dropout(dropout)
         self.fc_hidden = ibp.Linear(hidden_size * 2, hidden_size)
         self.fc_output = ibp.Linear(hidden_size, 1)
@@ -740,6 +740,8 @@ def load_datasets(device, opts):
         elif opts.use_lm:
             attack_surface = attacks.LMConstrainedAttackSurface.from_files(
                 opts.neighbor_file, opts.imdb_lm_file)
+        elif opts.use_ins and opts.model != "lstm-dp":
+            attack_surface = attacks.WordSubstitutionInsAttackSurface.from_file(opts.neighbor_file, opts.sub_num)
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')
@@ -820,7 +822,7 @@ def load_model(word_mat, device, opts):
         model = LSTMDPModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
-            sub_num=opts.sub_num).to(device)
+            sub_num=opts.sub_num, use_ins=opts.use_ins).to(device)
     elif opts.model == 'lstm-final-state':
         model = LSTMFinalStateModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,

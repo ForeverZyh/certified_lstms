@@ -91,6 +91,9 @@ class IntervalBoundedTensor(BoundedTensor):
             val = torch.where((self.lb < x2) | (self.ub > x2), self.val, x2)
             return IntervalBoundedTensor(val, torch.min(self.lb, x2), torch.max(self.ub, x2))
 
+    def clone(self):
+        return IntervalBoundedTensor(self.val.clone(), self.lb.clone(), self.ub.clone())
+
     def to(self, device):
         self.val = self.val.to(device)
         self.lb = self.lb.to(device)
@@ -425,8 +428,9 @@ class LSTM(nn.Module):
 class LSTMDP(nn.Module):
     """An LSTM."""
 
-    def __init__(self, input_size, hidden_size, sub_num, bidirectional=False):
+    def __init__(self, input_size, hidden_size, sub_num, bidirectional=False, use_ins=False):
         super(LSTMDP, self).__init__()
+        self.use_ins = use_ins
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.sub_num = sub_num
@@ -499,6 +503,7 @@ class LSTMDP(nn.Module):
         idxs = range(T)
         if reverse:
             idxs = idxs[::-1]
+        x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
 
         def compute_state(h, c, x_t, mask_t):
             if analysis_mode:
@@ -514,9 +519,14 @@ class LSTMDP(nn.Module):
                 return h, c, i_t, f_t, o_t
             return h, c
 
-        deltas = [self.sub_num]
-        trans = [[1, 1]]  # [s, t]
-        outputs = [output]
+        if self.use_ins:
+            deltas = [self.sub_num, self.sub_num]
+            trans = [[1, 1], [1, 2]]  # [s, t]
+            outputs = [output, None]  # TODO: use None for Ins currently, improve later
+        else:
+            deltas = [self.sub_num]
+            trans = [[1, 1]]  # [s, t]
+            outputs = [output]
         F = dict()
         q = [queue.Queue() for _ in range(T)]
         ans = [None for _ in range(T)]
@@ -550,7 +560,7 @@ class LSTMDP(nn.Module):
                 # output_pos means the output has reached this position
                 # input_pos means the input has been used at this position
                 input_pos = u[0]
-                for (tran, delta) in zip(trans, deltas):
+                for (tran, delta) in zip(trans, u[1:]):
                     input_pos += delta * (tran[0] - tran[1])
 
                 if input_pos + 1 < T:
@@ -572,9 +582,12 @@ class LSTMDP(nn.Module):
                             for step in range(tran[1]):
                                 output_pos_ptr = u[0] + 1 + step
                                 if output_pos_ptr >= T: break  # truncate at the max_len
-                                post_state = compute_state(h_, c_, output[:, output_pos_ptr, :], mask_t)
+                                if output is not None:
+                                    post_state = compute_state(h_, c_, output[:, output_pos_ptr, :], mask_t)
+                                else:
+                                    post_state = compute_state(h_, c_, x[:, input_pos + 1, :], mask_t)
                                 v[0] = output_pos_ptr
-                                add(tuple(v), post_state, step + 1 == tran[1])
+                                add(tuple(v), post_state, step + 1 != tran[1])
                                 if analysis_mode:
                                     h_, c_, _, _, _ = post_state
                                 else:
