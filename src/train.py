@@ -267,6 +267,7 @@ def parse_args():
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--sub-num', type=int, default=None)
+  parser.add_argument('--use-ins', action='store_true', help='Use insertion in the attack surface')
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
