@@ -94,6 +94,9 @@ class IntervalBoundedTensor(BoundedTensor):
     def clone(self):
         return IntervalBoundedTensor(self.val.clone(), self.lb.clone(), self.ub.clone())
 
+    def repeat(self, *dim):
+        return IntervalBoundedTensor(self.val.repeat(*dim), self.lb.repeat(*dim), self.ub.repeat(*dim))
+
     def to(self, device):
         self.val = self.val.to(device)
         self.lb = self.lb.to(device)
@@ -519,6 +522,7 @@ class LSTMDP(nn.Module):
                 return h, c, i_t, f_t, o_t
             return h, c
 
+        assert not self.use_ins  # ad hoc implementation for Sub
         if self.use_ins:
             deltas = [self.sub_num, self.sub_num]
             trans = [[1, 1], [1, 2]]  # [s, t]
@@ -527,81 +531,30 @@ class LSTMDP(nn.Module):
             deltas = [self.sub_num]
             trans = [[1, 1]]  # [s, t]
             outputs = [output]
-        F = dict()
-        q = [queue.Queue() for _ in range(T)]
-        ans = [None for _ in range(T)]
-        state = (-1,) + (0,) * len(trans)
 
-        def add(state, hidden, unextendable=False):
-            if state[0] >= 0:
-                if ans[state[0]] is None:
-                    ans[state[0]] = hidden
-                else:
-                    ans[state[0]] = merge(ans[state[0]], hidden)
-            if not unextendable:
-                if state in F:
-                    F[state] = merge(F[state], hidden)
-                else:
-                    F[state] = hidden
-                    q[state[0]].put(state)
+        h = h.repeat(self.sub_num + 1, 1)
+        c = c.repeat(self.sub_num + 1, 1)
+        x = x.repeat(self.sub_num + 1, 1, 1)
+        output = output.repeat(self.sub_num + 1, 1, 1)
+        mask = mask.repeat(self.sub_num + 1, 1)
+        ans = []
+        for i in range(T):
+            # keep same
+            post_state_0 = compute_state(h[:B], c[:B], x[:B, i, :], mask[:B, i].unsqueeze(-1))
+            post_state0_1 = compute_state(h[B:], c[B:], x[B:, i, :], mask[B:, i].unsqueeze(-1))
 
-        add(state, (h, c, None, None, None) if analysis_mode else (h, c))
-        assert T > 1  # though it's dangerous, but anyway let us first use q[-1] and set it to empty
-        for i in range(-1, T - 1):
-            while not q[i].empty():
-                u = q[i].get()
-                if analysis_mode:
-                    h, c, i_t, f_t, o_t = F[u]
-                else:
-                    h, c = F[u]
+            # sub
+            post_state1 = compute_state(h[:-B], c[:-B], output[:-B, i, :], mask[:-B, i].unsqueeze(-1))
 
-                # u[0] is the output_pos
-                # compute the input_pos by the input/output length of every transformation
-                # output_pos means the output has reached this position
-                # input_pos means the input has been used at this position
-                input_pos = u[0]
-                for (tran, delta) in zip(trans, u[1:]):
-                    input_pos += delta * (tran[0] - tran[1])
+            post_state_1 = merge(post_state0_1, post_state1)
+            post_state = tuple([cat([s, t], dim=0) for s, t in zip(post_state_0, post_state_1)])
 
-                if input_pos + 1 < T:
-                    # do dynamic programming
-                    for (id, (output, tran, delta)) in enumerate(zip(outputs, trans, deltas)):
-                        if u[id + 1] < delta:  # delta is not used up
-                            # Note that we did not constrain this position must satisfy phi
-                            # In other words, u[1, ..., k] denote AT MOST such numbers of transformations have been
-                            # applied, instead of exact numbers of transformations.
-                            # This compromise is due to we have to proceed in batches.
-                            # However, this can be fixed by using torch.where to filter out samples that do not satisfy
-                            # phi at this position.
-                            v = list(u)
-                            v[id + 1] += 1  # add delta
+            ans_t = tuple([t[:B, :] for t in post_state])
+            for j in range(self.sub_num):
+                ans_t = tuple([t.merge(t_[B * (j + 1):B * (j + 2)]) for t, t_ in zip(ans_t, post_state)])
 
-                            # TODO: the following implementation may not work on Del, Ins, Swap, etc.
-                            h_, c_ = h.clone(), c.clone()
-                            mask_t, _ = torch.min(mask[:, input_pos + 1: input_pos + 1 + tran[0]], dim=1, keepdim=True)
-                            for step in range(tran[1]):
-                                output_pos_ptr = u[0] + 1 + step
-                                if output_pos_ptr >= T: break  # truncate at the max_len
-                                if output is not None:
-                                    post_state = compute_state(h_, c_, output[:, output_pos_ptr, :], mask_t)
-                                else:
-                                    post_state = compute_state(h_, c_, x[:, input_pos + 1, :], mask_t)
-                                v[0] = output_pos_ptr
-                                add(tuple(v), post_state, step + 1 != tran[1])
-                                if analysis_mode:
-                                    h_, c_, _, _, _ = post_state
-                                else:
-                                    h_, c_ = post_state
-
-                # do nothing at this position
-                v = list(u)
-                v[0] += 1
-                v = tuple(v)
-                if input_pos + 1 < T:
-                    post_state = compute_state(h, c, x[:, input_pos + 1, :], mask[:, input_pos + 1].unsqueeze(-1))
-                else:  # if the input is used up
-                    post_state = compute_state(h, c, torch.zeros(B, d), torch.zeros(B, 1))
-                add(v, post_state)
+            ans.append(ans_t)
+            h, c = post_state[0], post_state[1]
 
         ret = [[] for _ in range(len(ans[0]))]
         for i in idxs:
@@ -1071,4 +1024,12 @@ def where(pred: torch.Tensor, x1: IntervalBoundedTensor, x2: IntervalBoundedTens
         torch.where(pred, x1.val, x2.val),
         torch.where(pred, x1.lb, x2.lb),
         torch.where(pred, x1.ub, x2.ub)
+    )
+
+
+def cat(xs, dim):
+    return IntervalBoundedTensor(
+        torch.cat([x.val for x in xs], dim=dim),
+        torch.cat([x.lb for x in xs], dim=dim),
+        torch.cat([x.ub for x in xs], dim=dim),
     )
