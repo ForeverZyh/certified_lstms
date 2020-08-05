@@ -1028,6 +1028,8 @@ def where(pred: torch.Tensor, x1: IntervalBoundedTensor, x2: IntervalBoundedTens
 
 
 def cat(xs, dim):
+    if not isinstance(xs[0], IntervalBoundedTensor):
+        return torch.cat(xs, dim=dim)
     return IntervalBoundedTensor(
         torch.cat([x.val for x in xs], dim=dim),
         torch.cat([x.lb for x in xs], dim=dim),
