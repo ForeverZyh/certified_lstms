@@ -312,23 +312,29 @@ class LSTMDPModel(AdversarialModel):
     """
 
     def __init__(self, word_vec_size, hidden_size, word_mat, device, pool='max', dropout=0.2,
-                 no_wordvec_layer=False, sub_num=None, use_ins=False):
+                 no_wordvec_layer=False, sub_num=None, use_ins=False, bidirectional=True):
         super(LSTMDPModel, self).__init__()
         assert sub_num is not None
         # TODO: to implement more discrete perturbation space
         self.sub_num = sub_num
+        self.bidirectional = bidirectional
         self.hidden_size = hidden_size
         self.pool = pool
+        if pool == 'final' and bidirectional:
+            raise AttributeError("bidirectional not available when pool='final'")
         self.no_wordvec_layer = no_wordvec_layer
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, sub_num, bidirectional=True, use_ins=use_ins)
+            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, sub_num, bidirectional=bidirectional, use_ins=use_ins)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
-            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, sub_num, bidirectional=True, use_ins=use_ins)
+            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, sub_num, bidirectional=bidirectional, use_ins=use_ins)
         self.dropout = ibp.Dropout(dropout)
-        self.fc_hidden = ibp.Linear(hidden_size * 2, hidden_size)
+        if bidirectional:
+            self.fc_hidden = ibp.Linear(hidden_size * 2, hidden_size)
+        else:
+            self.fc_hidden = ibp.Linear(hidden_size, hidden_size)
         self.fc_output = ibp.Linear(hidden_size, 1)
 
     def forward(self, batch, compute_bounds=True, cert_eps=1.0, analysis_mode=False):
@@ -365,16 +371,20 @@ class LSTMDPModel(AdversarialModel):
                 z_interval = x_interval
             z = x_vecs
 
-        h0 = torch.zeros((B, self.hidden_size * 2), device=self.device)  # B, h
-        c0 = torch.zeros((B, self.hidden_size * 2), device=self.device)  # B, h
+        h0 = torch.zeros((B, self.hidden_size * (2 if self.bidirectional else 1)), device=self.device)  # B, h
+        c0 = torch.zeros((B, self.hidden_size * (2 if self.bidirectional else 1)), device=self.device)  # B, h
         if analysis_mode:
             h_mat, c_mat, lstm_analysis = self.lstm(z, z_interval, (h0, c0), mask=mask,
                                                     analysis_mode=True)  # B, n, h each
         else:
             h_mat, c_mat = self.lstm(z, z_interval, (h0, c0), mask=mask)  # B, n, h each
-        h_masked = h_mat * mask.unsqueeze(2)
+
         if self.pool == 'mean':
+            h_masked = h_mat * mask.unsqueeze(2) # only need to mask the state sequence
             fc_in = ibp.sum(h_masked / lengths.to(dtype=torch.float).view(-1, 1, 1), 1)  # B, h
+        elif self.pool == 'final':
+            # don't need to mask the final state
+            fc_in = h_mat[:, -1, :]
         else:
             raise NotImplementedError()
         fc_in = self.dropout(fc_in)
@@ -822,7 +832,7 @@ def load_model(word_mat, device, opts):
         model = LSTMDPModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
-            sub_num=opts.sub_num, use_ins=opts.use_ins).to(device)
+            sub_num=opts.sub_num, use_ins=opts.use_ins, bidirectional=not opts.no_bidirectional).to(device)
     elif opts.model == 'lstm-final-state':
         model = LSTMFinalStateModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,

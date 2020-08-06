@@ -252,13 +252,14 @@ def parse_args():
   parser.add_argument('--hidden-size', '-d', type=int, default=100)
   parser.add_argument('--kernel-size', '-k', type=int, default=3,
                       help='Kernel size, for CNN convolutions and pooling')
-  parser.add_argument('--pool', choices=['max', 'mean', 'attn'], default='max')
+  parser.add_argument('--pool', choices=['max', 'mean', 'attn', 'final'], default='max')
   parser.add_argument('--num-layers', type=int, default=3, help='Num layers for SNLI baseline BOW model')
   parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
   parser.add_argument('--early-ibp', action='store_true', help="Do to_interval_bounded directly on base word vectors")
   parser.add_argument('--no-relu-wordvec', action='store_true', help="Don't do ReLU after word vector transform")
   parser.add_argument('--unfreeze-wordvec', action='store_true', help="Don't freeze word vectors")
   parser.add_argument('--glove', '-g', choices=vocabulary.GLOVE_CONFIGS, default='840B.300d')
+  parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
   # Adversary
   parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic'],
                       default=None, help='Which adversary to test on')
