@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import copy
+from functools import partial
 
 
 class Transformation(ABC):
@@ -44,53 +45,22 @@ class Transformation(ABC):
 
         return ret
 
-    def get_output_for_baseline(self):
-        """
-        :return: a list of lists. Each list is in the form of [choice_0, choice_1, ..., ], where each choice_i is a
-        word.
-        Notice: the output list can be longer than the self.ipt, because the Ins transformation can add words.
-        """
-        ret = [set() for _ in self.ipt]
-        applied = 0  # maximal number of times the transformation has been applied before the current position
-        for i in range(len(self.ipt) - self.s + 1):
-            for enum_applied in range(applied + 1):
-                output_pos = i + enum_applied * (self.t - self.s)  # the current output position according to i
-                while output_pos >= len(ret):
-                    ret.append(set())
-                ret[output_pos].add(self.ipt[i])  # add the current word
-
-            if self.phi(i):
-                choices = self.transformer(i)
-                for enum_applied in range(min(applied + 1, self.delta)): # restrict to self.delta - 1
-                    output_pos = i + enum_applied * (self.t - self.s)  # the current output position according to i
-                    for choice in choices:
-                        # choice is a tuple and |choice| = self.t.
-                        while output_pos + len(choice) - 1 >= len(ret):
-                            ret.append(set())
-                        for j, x in enumerate(choice):
-                            ret[output_pos + j].add(x)
-
-                applied = min(applied + 1, self.delta)
-
-        return [list(x) for x in ret]
-
 
 class Sub(Transformation):
-    def __init__(self, ipt, delta, attack_surface, vocab):
-        ipt = [w for w in ipt if w in vocab]
+    def __init__(self, ipt, delta, attack_surface):
         super(Sub, self).__init__(1, 1, ipt, delta)
         self.swaps = attack_surface.get_swaps(ipt)
 
     def phi(self, start_pos):
-        return len(self.swaps[start_pos]) > 0
+        return start_pos < len(self.ipt) and len(self.swaps[start_pos]) > 0
 
     def transformer(self, start_pos):
         return [(swap,) for swap in self.swaps[start_pos]]
 
 
 class Ins(Transformation):
-    def __init__(self, ipt, delta, vocab):
-        super(Ins, self).__init__(1, 2, [w for w in ipt if w in vocab], delta)
+    def __init__(self, ipt, delta):
+        super(Ins, self).__init__(1, 2, ipt, delta)
 
     def phi(self, start_pos):
         return start_pos < len(self.ipt)
@@ -100,8 +70,8 @@ class Ins(Transformation):
 
 
 class Del(Transformation):
-    def __init__(self, ipt, delta, vocab, stop_words=None):
-        super(Del, self).__init__(1, 0, [w for w in ipt if w in vocab], delta)
+    def __init__(self, ipt, delta, stop_words=None):
+        super(Del, self).__init__(1, 0, ipt, delta)
         if stop_words is None:
             self.stop_words = {"a", "and", "the", "of", "to"}
         else:
@@ -115,22 +85,73 @@ class Del(Transformation):
 
 
 class Perturbation:
-    def __init__(self, trans: list):
-        self.trans = trans
-        for tran in self.trans:
-            assert isinstance(tran, Transformation)
+    def __init__(self, trans, ipt, attack_surface=None, stop_words=None):
+        trans = eval(trans)
+        self.trans = []
+        for tran, delta in trans:
+            if tran == Sub:
+                assert attack_surface is not None
+                self.trans.append(Sub(ipt, delta, attack_surface=attack_surface))
+            elif tran == Del:
+                self.trans.append(Del(ipt, delta, stop_words=stop_words))
+            elif tran == Ins:
+                self.trans.append(Ins(ipt, delta))
+            else:
+                raise NotImplementedError
+
+        self.ipt = ipt
 
     def get_output_for_baseline(self):
-        ret = [set() for _ in self.trans[0].ipt]
-        for tran in self.trans:
-            tmp = tran.get_output_for_baseline()
-            for x, y in zip(ret, tmp):
-                x.update(y)
+        ret = [set() for _ in self.ipt]
+        applied = [0 for _ in self.trans]
+
+        # maximal number of times the transformations have been applied before the current position
+
+        def cal_lower_upper_applied(applied):
+            pos_lower_bound = 0
+            pos_upper_bound = 0
+            for id_tran, tran in enumerate(self.trans):
+                if tran.t > tran.s:
+                    pos_upper_bound += (tran.t - tran.s) * applied[id_tran]
+                elif tran.t < tran.s:
+                    pos_lower_bound += (tran.t - tran.s) * applied[id_tran]
+
+            return pos_lower_bound, pos_upper_bound
+
+        for i in range(len(self.ipt)):
+            pos_lower_bound, pos_upper_bound = cal_lower_upper_applied(applied)
+            for pos_enum in range(pos_lower_bound, pos_upper_bound + 1):
+                output_pos = i + pos_enum  # the current output position according to i
+                if output_pos < 0: continue
+                while output_pos >= len(ret):
+                    ret.append(set())
+                ret[output_pos].add(self.ipt[i])  # add the current word
+
+            old_applied = copy.copy(applied)
+            for id_tran, tran in enumerate(self.trans):
+                if tran.phi(i):
+                    choices = tran.transformer(i)
+                    old_applied[id_tran] = min(old_applied[id_tran], tran.delta - 1)  # restrict to tran.delta - 1
+                    pos_lower_bound, pos_upper_bound = cal_lower_upper_applied(old_applied)
+                    old_applied[id_tran] = applied[id_tran]
+                    for pos_enum in range(pos_lower_bound, pos_upper_bound + 1):
+                        output_pos = i + pos_enum  # the current output position according to i
+                        if output_pos < 0: continue
+                        for choice in choices:
+                            # choice is a tuple and |choice| = self.t.
+                            while output_pos + len(choice) - 1 >= len(ret):
+                                ret.append(set())
+                            for j, x in enumerate(choice):
+                                ret[output_pos + j].add(x)
+
+                    applied[id_tran] = min(applied[id_tran] + 1, tran.delta)
 
         return [list(x) for x in ret]
 
 
 def tests():
     sen = ["i", "a", "to", "boys", "you", "tuzi", "a", "y"]
-    a = Perturbation([Ins(sen, 2, set(sen)), Del(sen, 2, set(sen))])
+    a = Perturbation("[(Ins, 2), (Del, 2)]", sen)
     print(a.get_output_for_baseline())
+
+# tests()

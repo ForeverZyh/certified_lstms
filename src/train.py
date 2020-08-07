@@ -267,8 +267,7 @@ def parse_args():
   parser.add_argument('--adv-num-tries', type=int, default=2)
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
-  parser.add_argument('--sub-num', type=int, default=None)
-  parser.add_argument('--use-ins', action='store_true', help='Use insertion in the attack surface')
+  parser.add_argument('--perturbation', type=str, default=None)
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
@@ -365,7 +364,7 @@ def main():
                          batch_size=OPTS.batch_size)
     adversary = None
     if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface)
+      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
     elif OPTS.adversary == 'greedy':
       adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
                                              num_tries=OPTS.adv_num_tries)
@@ -383,7 +382,7 @@ def main():
   else:
     adversary = None
     if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface)
+      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
     elif OPTS.adversary == 'greedy':
       adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
                                              num_tries=OPTS.adv_num_tries)

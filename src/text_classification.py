@@ -19,6 +19,7 @@ import attacks
 import data_util
 import ibp
 import vocabulary
+from perturbation import Perturbation, Sub, Ins, Del
 
 LOSS_FUNC = nn.BCEWithLogitsLoss()
 IMDB_DIR = 'data/aclImdb'
@@ -312,11 +313,11 @@ class LSTMDPModel(AdversarialModel):
     """
 
     def __init__(self, word_vec_size, hidden_size, word_mat, device, pool='max', dropout=0.2,
-                 no_wordvec_layer=False, sub_num=None, use_ins=False, bidirectional=True):
+                 no_wordvec_layer=False, bidirectional=True, perturbation=None):
         super(LSTMDPModel, self).__init__()
-        assert sub_num is not None
+        assert perturbation is not None
         # TODO: to implement more discrete perturbation space
-        self.sub_num = sub_num
+        self.perturbation = perturbation
         self.bidirectional = bidirectional
         self.hidden_size = hidden_size
         self.pool = pool
@@ -326,10 +327,10 @@ class LSTMDPModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, sub_num, bidirectional=bidirectional, use_ins=use_ins)
+            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, perturbation, bidirectional=bidirectional)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
-            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, sub_num, bidirectional=bidirectional, use_ins=use_ins)
+            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, perturbation, bidirectional=bidirectional)
         self.dropout = ibp.Dropout(dropout)
         if bidirectional:
             self.fc_hidden = ibp.Linear(hidden_size * 2, hidden_size)
@@ -380,7 +381,7 @@ class LSTMDPModel(AdversarialModel):
             h_mat, c_mat = self.lstm(z, z_interval, (h0, c0), mask=mask)  # B, n, h each
 
         if self.pool == 'mean':
-            h_masked = h_mat * mask.unsqueeze(2) # only need to mask the state sequence
+            h_masked = h_mat * mask.unsqueeze(2)  # only need to mask the state sequence
             fc_in = ibp.sum(h_masked / lengths.to(dtype=torch.float).view(-1, 1, 1), 1)  # B, h
         elif self.pool == 'final':
             # don't need to mask the final state
@@ -484,6 +485,21 @@ class ExhaustiveAdversary(Adversary):
     Only practical for short sentences.
     """
 
+    def __init__(self, attack_surface, perturbation):
+        super(ExhaustiveAdversary, self).__init__(attack_surface)
+        p = eval(perturbation)
+        self.deltas = [0, 0, 0]
+        for tran, delta in p:
+            if tran == Sub:
+                assert attack_surface is not None
+                self.deltas[2] = delta
+            elif tran == Del:
+                self.deltas[0] = delta
+            elif tran == Ins:
+                self.deltas[1] = delta
+            else:
+                raise NotImplementedError
+
     def run(self, model, dataset, device, opts=None):
         is_correct = []
         adv_exs = []
@@ -511,7 +527,7 @@ class ExhaustiveAdversary(Adversary):
             choices = [cur_swaps for w, cur_swaps in zip(words, swaps)]
 
             is_correct_single = True
-            for batch_x in self.DelDupSubWord(0, 0, 3, words, choices):
+            for batch_x in self.DelDupSubWord(*self.deltas, words, choices):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
@@ -750,8 +766,6 @@ def load_datasets(device, opts):
         elif opts.use_lm:
             attack_surface = attacks.LMConstrainedAttackSurface.from_files(
                 opts.neighbor_file, opts.imdb_lm_file)
-        elif opts.use_ins and opts.model != "lstm-dp":
-            attack_surface = attacks.WordSubstitutionInsAttackSurface.from_file(opts.neighbor_file, opts.sub_num)
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')
@@ -762,12 +776,14 @@ def load_datasets(device, opts):
                                               downsample_to=opts.downsample_to,
                                               downsample_shard=opts.downsample_shard,
                                               truncate_to=opts.truncate_to,
-                                              include_self=opts.model != "lstm-dp")
+                                              include_self=opts.model != "lstm-dp",
+                                              perturbation=opts.perturbation)
         dev_data = data_class.from_raw_data(raw_data.dev_data, vocab, attack_surface,
                                             downsample_to=opts.downsample_to,
                                             downsample_shard=opts.downsample_shard,
                                             truncate_to=opts.truncate_to,
-                                            include_self=opts.model != "lstm-dp")
+                                            include_self=opts.model != "lstm-dp",
+                                            perturbation=opts.perturbation)
         if opts.data_cache_dir:
             with open(os.path.join(opts.data_cache_dir, 'train_data.pkl'), 'wb') as outfile:
                 pickle.dump(train_data, outfile)
@@ -832,7 +848,7 @@ def load_model(word_mat, device, opts):
         model = LSTMDPModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
-            sub_num=opts.sub_num, use_ins=opts.use_ins, bidirectional=not opts.no_bidirectional).to(device)
+            perturbation=opts.perturbation, bidirectional=not opts.no_bidirectional).to(device)
     elif opts.model == 'lstm-final-state':
         model = LSTMFinalStateModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
@@ -885,29 +901,29 @@ class TextClassificationDataset(data_util.ProcessedDataset):
 
     @classmethod
     def from_raw_data(cls, raw_data, vocab, attack_surface=None, truncate_to=None,
-                      downsample_to=None, downsample_shard=0, include_self=True):
+                      downsample_to=None, downsample_shard=0, include_self=True, perturbation=None):
         if downsample_to:
             raw_data = raw_data[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
         examples = []
         for x, y in raw_data:
             all_words = [w.lower() for w in x.split()]
-            if attack_surface:
-                all_swaps = attack_surface.get_swaps(all_words)
+            if perturbation is not None:
                 words = [w for w in all_words if w in vocab]
-                swaps = [s for w, s in zip(all_words, all_swaps) if w in vocab]
-                choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
+                choices = Perturbation(perturbation, words, attack_surface=attack_surface).get_output_for_baseline()
                 # TODO: remove w from choices, and be careful about the DiscreteChoice.val will be outside of the bound.
                 # if include_self:
                 #     choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
                 # else:
                 #     choices = swaps
+            elif attack_surface is not None:
+                raise AttributeError
             else:
                 words = [w for w in all_words if w in vocab]  # Delete UNK words
             if truncate_to:
                 words = words[:truncate_to]
             word_idxs = [vocab.get_index(w) for w in words]
             x_torch = torch.tensor(word_idxs).view(1, -1, 1)  # (1, T, d)
-            if attack_surface:
+            if perturbation is not None:
                 choices_word_idxs = [
                     torch.tensor([vocab.get_index(c) for c in c_list], dtype=torch.long) for c_list in choices
                 ]
@@ -916,6 +932,8 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 choices_torch = pad_sequence(choices_word_idxs, batch_first=True).unsqueeze(2).unsqueeze(
                     0)  # (1, T, C, 1)
                 choices_mask = (choices_torch.squeeze(-1) != 0).long()  # (1, T, C)
+            elif attack_surface is not None:
+                raise AttributeError
             else:
                 choices_torch = x_torch.view(1, -1, 1, 1)  # (1, T, 1, 1)
                 choices_mask = torch.ones_like(x_torch.view(1, -1, 1))
