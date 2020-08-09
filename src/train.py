@@ -204,7 +204,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
       'cert_acc': 0.0,
       'loss': 0.0
   }
-  data = dataset.get_loader(batch_size)
+  data = dataset.get_loader(32)
   with torch.no_grad():
     for batch in tqdm(data):
       batch = data_util.dict_batch_to_device(batch, device)
