@@ -252,13 +252,14 @@ def parse_args():
   parser.add_argument('--hidden-size', '-d', type=int, default=100)
   parser.add_argument('--kernel-size', '-k', type=int, default=3,
                       help='Kernel size, for CNN convolutions and pooling')
-  parser.add_argument('--pool', choices=['max', 'mean', 'attn'], default='max')
+  parser.add_argument('--pool', choices=['max', 'mean', 'attn', 'final'], default='max')
   parser.add_argument('--num-layers', type=int, default=3, help='Num layers for SNLI baseline BOW model')
   parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
   parser.add_argument('--early-ibp', action='store_true', help="Do to_interval_bounded directly on base word vectors")
   parser.add_argument('--no-relu-wordvec', action='store_true', help="Don't do ReLU after word vector transform")
   parser.add_argument('--unfreeze-wordvec', action='store_true', help="Don't freeze word vectors")
   parser.add_argument('--glove', '-g', choices=vocabulary.GLOVE_CONFIGS, default='840B.300d')
+  parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
   # Adversary
   parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic'],
                       default=None, help='Which adversary to test on')
@@ -266,8 +267,7 @@ def parse_args():
   parser.add_argument('--adv-num-tries', type=int, default=2)
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
-  parser.add_argument('--sub-num', type=int, default=None)
-  parser.add_argument('--use-ins', action='store_true', help='Use insertion in the attack surface')
+  parser.add_argument('--perturbation', type=str, default=None)
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
@@ -364,7 +364,7 @@ def main():
                          batch_size=OPTS.batch_size)
     adversary = None
     if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface)
+      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
     elif OPTS.adversary == 'greedy':
       adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
                                              num_tries=OPTS.adv_num_tries)
@@ -382,7 +382,7 @@ def main():
   else:
     adversary = None
     if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface)
+      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
     elif OPTS.adversary == 'greedy':
       adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
                                              num_tries=OPTS.adv_num_tries)

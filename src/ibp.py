@@ -431,12 +431,11 @@ class LSTM(nn.Module):
 class LSTMDP(nn.Module):
     """An LSTM."""
 
-    def __init__(self, input_size, hidden_size, sub_num, bidirectional=False, use_ins=False):
+    def __init__(self, input_size, hidden_size, perturbation, bidirectional=False):
         super(LSTMDP, self).__init__()
-        self.use_ins = use_ins
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.sub_num = sub_num
+        self.perturbation = perturbation
         self.bidirectional = bidirectional
         self.i2h = Linear(input_size, 4 * hidden_size)
         self.h2h = Linear(hidden_size, 4 * hidden_size)
