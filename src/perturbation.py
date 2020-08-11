@@ -47,9 +47,9 @@ class Transformation(ABC):
 
 
 class Sub(Transformation):
-    def __init__(self, ipt, delta, attack_surface):
+    def __init__(self, ipt, delta, swaps):
         super(Sub, self).__init__(1, 1, ipt, delta)
-        self.swaps = attack_surface.get_swaps(ipt)
+        self.swaps = swaps
 
     def phi(self, start_pos):
         return start_pos < len(self.ipt) and len(self.swaps[start_pos]) > 0
@@ -85,25 +85,24 @@ class Del(Transformation):
 
 
 class Perturbation:
-    def __init__(self, trans, ipt, attack_surface=None, stop_words=None):
+    def __init__(self, trans, ipt, vocab, attack_surface=None, stop_words=None):
         trans = eval(trans)
+        self.ipt = [w for w in ipt if w in vocab]
         self.trans = []
         self.has_del = False
         self.has_ins = False
         for tran, delta in trans:
             if tran == Sub:
                 assert attack_surface is not None
-                self.trans.append(Sub(ipt, delta, attack_surface=attack_surface))
+                self.trans.append(Sub(self.ipt, delta, attack_surface.get_swaps(ipt)))
             elif tran == Del:
-                self.trans.append(Del(ipt, delta, stop_words=stop_words))
+                self.trans.append(Del(self.ipt, delta, stop_words=stop_words))
                 self.has_del = delta > 0
             elif tran == Ins:
-                self.trans.append(Ins(ipt, delta))
+                self.trans.append(Ins(self.ipt, delta))
                 self.has_ins = delta > 0
             else:
                 raise NotImplementedError
-
-        self.ipt = ipt
 
     def get_output_for_baseline_final_state(self):
         ret = [set() for _ in range(len(self.ipt) * 2)]

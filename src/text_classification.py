@@ -902,9 +902,9 @@ class TextClassificationDataset(data_util.ProcessedDataset):
         for x, y in raw_data:
             all_words = [w.lower() for w in x.split()]
             if perturbation is not None:
-                words = [w for w in all_words if w in vocab]
-                choices = Perturbation(perturbation, words,
-                                       attack_surface=attack_surface).get_output_for_baseline_final_state()
+                perturb = Perturbation(perturbation, all_words, vocab, attack_surface=attack_surface)
+                choices = perturb.get_output_for_baseline_final_state()
+                words = perturb.ipt
                 assert len(words) == len(choices)  # TODO: This does not hold when Ins is considered.
                 # TODO: remove w from choices, and be careful about the DiscreteChoice.val will be outside of the bound.
                 # if include_self:
@@ -971,7 +971,7 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             choice_masks.append(ex['x'].choice_mask)
             cur_len = ex['x'].shape[1]
             masks[i, :cur_len] = 1
-            unk_masks[i, :cur_len] = ex['x'].unk_mask[0]
+            unk_masks[i, :cur_len] = ex['x'].unk_mask[0] if ex['x'].unk_mask is not None else 1
             y[i, 0] = ex['y']
             lengths[i] = ex['lengths'][0]
         x_vals = data_util.multi_dim_padded_cat(x_vals, 0).long()
