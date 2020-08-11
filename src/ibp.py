@@ -524,7 +524,8 @@ class LSTMDP(nn.Module):
                 c_t = c_t * mask_t + c * (1.0 - mask_t)
             if unk_mask_t is not None:
                 merge_h = h_t.merge(h)
-                # unk_mask_t[i] = 1 then h_t == (old) h_t, h_t = merge_h, i.e., we merge the state when mask is 0
+                # unk_mask_t[i] = 1 then h_t == (old) h_t, otherwise h_t = merge_h, i.e.,
+                # we merge the state when mask is 0
                 merge_c = c_t.merge(c)
                 h_t = h_t * unk_mask_t + merge_h * (1.0 - unk_mask_t)
                 c_t = c_t * unk_mask_t + merge_c * (1.0 - unk_mask_t)
@@ -536,7 +537,7 @@ class LSTMDP(nn.Module):
         ans = []
         for i in range(T):
             # keep same
-            post_state = compute_state(h, c, x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+            post_state = compute_state(h, c, output[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
                                        unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
 
             ans.append(post_state)
