@@ -94,7 +94,8 @@ class Perturbation:
         for tran, delta in trans:
             if tran == Sub:
                 assert attack_surface is not None
-                self.trans.append(Sub(self.ipt, delta, attack_surface.get_swaps(ipt)))
+                swaps = attack_surface.get_swaps(ipt)
+                self.trans.append(Sub(self.ipt, delta, [swap for swap, w in zip(swaps, ipt) if w in vocab]))
             elif tran == Del:
                 self.trans.append(Del(self.ipt, delta, stop_words=stop_words))
                 self.has_del = delta > 0
