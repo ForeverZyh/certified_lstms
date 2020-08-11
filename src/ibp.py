@@ -8,6 +8,8 @@ from torch import nn
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 
+from perturbation import Perturbation
+
 # DEBUG = False
 DEBUG = True
 TOLERANCE = 1e-5
@@ -122,7 +124,7 @@ class IntervalBoundedTensor(BoundedTensor):
         self.ub.__delitem__(key)
 
 
-class DiscreteChoiceTensor(BoundedTensor):
+class DiscreteChoiceTensorWithUNK(BoundedTensor):
     """A tensor for which each row can take a discrete set of values.
 
     More specifically, each slice along the first d-1 dimensions of the tensor
@@ -134,7 +136,7 @@ class DiscreteChoiceTensor(BoundedTensor):
     Only some layers accept this tensor.
     """
 
-    def __init__(self, val, choice_mat, choice_mask, sequence_mask):
+    def __init__(self, val, choice_mat, choice_mask, sequence_mask, unk_mask):
         """Create a DiscreteChoiceTensor.
 
         Args:
@@ -147,6 +149,7 @@ class DiscreteChoiceTensor(BoundedTensor):
         self.choice_mat = choice_mat
         self.choice_mask = choice_mask
         self.sequence_mask = sequence_mask
+        self.unk_mask = unk_mask
 
     def to_interval_bounded(self, eps=1.0):
         """
@@ -198,10 +201,10 @@ class Linear(nn.Linear):
             mu_new = F.linear(mu_cur, self.weight, self.bias)
             r_new = F.linear(r_cur, weight_abs)
             return IntervalBoundedTensor(z, mu_new - r_new, mu_new + r_new)
-        elif isinstance(x, DiscreteChoiceTensor):
+        elif isinstance(x, DiscreteChoiceTensorWithUNK):
             new_val = F.linear(x.val, self.weight, self.bias)
             new_choices = F.linear(x.choice_mat, self.weight, self.bias)
-            return DiscreteChoiceTensor(new_val, new_choices, x.choice_mask, x.sequence_mask)
+            return DiscreteChoiceTensorWithUNK(new_val, new_choices, x.choice_mask, x.sequence_mask, x.unk_mask)
         elif isinstance(x, NormBallTensor):
             q = 1.0 / (1.0 - 1.0 / x.p_norm)  # q from Holder's inequality
             z = F.linear(x.val, self.weight, self.bias)
@@ -265,7 +268,7 @@ class Embedding(nn.Embedding):
     def forward(self, x):
         if isinstance(x, torch.Tensor):
             return super(Embedding, self).forward(x.squeeze(-1))
-        if isinstance(x, DiscreteChoiceTensor):
+        if isinstance(x, DiscreteChoiceTensorWithUNK):
             if x.val.shape[-1] != 1:
                 raise ValueError('Input tensor has shape %s, where last dimension != 1' % x.shape)
             new_val = F.embedding(
@@ -274,7 +277,7 @@ class Embedding(nn.Embedding):
             new_choices = F.embedding(
                 x.choice_mat.squeeze(-1), self.weight, self.padding_idx, self.max_norm,
                 self.norm_type, self.scale_grad_by_freq, self.sparse)
-            return DiscreteChoiceTensor(new_val, new_choices, x.choice_mask, x.sequence_mask)
+            return DiscreteChoiceTensorWithUNK(new_val, new_choices, x.choice_mask, x.sequence_mask, x.unk_mask)
         else:
             raise TypeError(x)
 
@@ -439,6 +442,7 @@ class LSTMDP(nn.Module):
         self.bidirectional = bidirectional
         self.i2h = Linear(input_size, 4 * hidden_size)
         self.h2h = Linear(hidden_size, 4 * hidden_size)
+        self.deltas = Perturbation.str2deltas(perturbation)
         if bidirectional:
             self.back_i2h = Linear(input_size, 4 * hidden_size)
             self.back_h2h = Linear(hidden_size, 4 * hidden_size)
@@ -494,12 +498,14 @@ class LSTMDP(nn.Module):
             return h_seq, c_seq, i_seq, f_seq, o_seq
         return h_seq, c_seq
 
-    def _processDP(self, h, c, x, i2h, h2h, reverse=False, mask=None, analysis_mode=False, output=None):
+    def _processDP(self, h, c, x, i2h, h2h, reverse=False, mask=None, analysis_mode=False, output=None, unk_mask=None):
         if reverse:
             x = x.flip(1)
             output = output.flip(1)
             if mask is not None:
                 mask = mask.flip(1)
+            if unk_mask is not None:
+                unk_mask = unk_mask.flip(1)
 
         B, T, d = x.shape  # batch_first=True
         idxs = range(T)
@@ -507,52 +513,33 @@ class LSTMDP(nn.Module):
             idxs = idxs[::-1]
         x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
 
-        def compute_state(h, c, x_t, mask_t):
+        def compute_state(h, c, x_t, mask_t, unk_mask_t):
             if analysis_mode:
                 h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
             else:
                 h_t, c_t = self._step(h, c, x_t, i2h, h2h)
             if mask_t is not None:
                 # Don't update h or c when mask is 0
-                h = h_t * mask_t + h * (1.0 - mask_t)
-                c = c_t * mask_t + c * (1.0 - mask_t)
+                h_t = h_t * mask_t + h * (1.0 - mask_t)
+                c_t = c_t * mask_t + c * (1.0 - mask_t)
+            if unk_mask_t is not None:
+                merge_h = h_t.merge(h)
+                # unk_mask_t[i] = 1 then h_t == (old) h_t, h_t = merge_h, i.e., we merge the state when mask is 0
+                merge_c = c_t.merge(c)
+                h_t = h_t * unk_mask_t + merge_h * (1.0 - unk_mask_t)
+                c_t = c_t * unk_mask_t + merge_c * (1.0 - unk_mask_t)
 
             if analysis_mode:
-                return h, c, i_t, f_t, o_t
-            return h, c
+                return h_t, c_t, i_t, f_t, o_t
+            return h_t, c_t
 
-        assert not self.use_ins  # ad hoc implementation for Sub
-        if self.use_ins:
-            deltas = [self.sub_num, self.sub_num]
-            trans = [[1, 1], [1, 2]]  # [s, t]
-            outputs = [output, None]  # TODO: use None for Ins currently, improve later
-        else:
-            deltas = [self.sub_num]
-            trans = [[1, 1]]  # [s, t]
-            outputs = [output]
-
-        h = h.repeat(self.sub_num + 1, 1)
-        c = c.repeat(self.sub_num + 1, 1)
-        x = x.repeat(self.sub_num + 1, 1, 1)
-        output = output.repeat(self.sub_num + 1, 1, 1)
-        mask = mask.repeat(self.sub_num + 1, 1)
         ans = []
         for i in range(T):
             # keep same
-            post_state_0 = compute_state(h[:B], c[:B], x[:B, i, :], mask[:B, i].unsqueeze(-1))
-            post_state0_1 = compute_state(h[B:], c[B:], x[B:, i, :], mask[B:, i].unsqueeze(-1))
+            post_state = compute_state(h, c, x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                       unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
 
-            # sub
-            post_state1 = compute_state(h[:-B], c[:-B], output[:-B, i, :], mask[:-B, i].unsqueeze(-1))
-
-            post_state_1 = merge(post_state0_1, post_state1)
-            post_state = tuple([cat([s, t], dim=0) for s, t in zip(post_state_0, post_state_1)])
-
-            ans_t = tuple([t[:B, :] for t in post_state])
-            for j in range(self.sub_num):
-                ans_t = tuple([t.merge(t_[B * (j + 1):B * (j + 2)]) for t, t_ in zip(ans_t, post_state)])
-
-            ans.append(ans_t)
+            ans.append(post_state)
             h, c = post_state[0], post_state[1]
 
         ret = [[] for _ in range(len(ans[0]))]
@@ -562,7 +549,7 @@ class LSTMDP(nn.Module):
 
         return ret
 
-    def forward(self, x, x_interval, s0, mask=None, analysis_mode=False):
+    def forward(self, x, x_interval, s0, mask=None, analysis_mode=False, unk_mask=None):
         """Forward pass of LSTM
 
         Args:
@@ -579,7 +566,7 @@ class LSTMDP(nn.Module):
         if x_interval is None:
             process = self._process
         else:
-            process = partial(self._processDP, output=x_interval)
+            process = partial(self._processDP, output=x_interval, unk_mask=unk_mask)
         if analysis_mode:
             h_seq, c_seq, i_seq, f_seq, o_seq = process(
                 h0, c0, x, self.i2h, self.h2h, mask=mask, analysis_mode=True)

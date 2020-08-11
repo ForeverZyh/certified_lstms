@@ -95,7 +95,7 @@ class BOWModel(AdversarialModel):
     def encode(sequence, mask):
       vecs = self.embs(sequence)
       vecs = self.rotation(vecs)
-      if isinstance(vecs, ibp.DiscreteChoiceTensor):
+      if isinstance(vecs, ibp.DiscreteChoiceTensorWithUNK):
         vecs = vecs.to_interval_bounded(eps=cert_eps)
       z1 = ibp.activation(F.relu, vecs)
       z1_masked = z1 * mask.unsqueeze(-1)
@@ -162,7 +162,7 @@ class DecompAttentionModel(AdversarialModel):
     """
     def encode(sequence, mask):
       vecs = self.embs(sequence)
-      if isinstance(vecs, ibp.DiscreteChoiceTensor):
+      if isinstance(vecs, ibp.DiscreteChoiceTensorWithUNK):
         null = torch.zeros_like(vecs.val[0])
         null_choice = torch.zeros_like(vecs.choice_mat[0])
         null[0] = self.null
@@ -174,7 +174,7 @@ class DecompAttentionModel(AdversarialModel):
         null[0] = self.null
         vecs = vecs + null
       vecs = self.rotation(vecs)
-      if isinstance(vecs, ibp.DiscreteChoiceTensor):
+      if isinstance(vecs, ibp.DiscreteChoiceTensorWithUNK):
         vecs = vecs.to_interval_bounded(eps=cert_eps)
       return ibp.activation(F.relu, vecs) * mask.unsqueeze(-1)
 
@@ -455,7 +455,7 @@ class EntailmentDataset(data_util.ProcessedDataset):
         choices_torch = x_torch.view(1, -1, 1, 1) # (1, T, 1, 1)
         choices_mask = torch.ones_like(x_torch.view(1, -1, 1))
       mask_torch = torch.ones((1, len(word_idxs)))
-      x_bounded = ibp.DiscreteChoiceTensor(x_torch, choices_torch, choices_mask, mask_torch)
+      x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch)
       lengths_torch = torch.tensor(len(word_idxs)).view(1)
       example[sequence] = dict(x=x_bounded, mask=mask_torch, lengths=lengths_torch)
     example['y'] = torch.zeros((1, len(EntailmentLabels)), dtype=torch.float)
@@ -520,10 +520,10 @@ class EntailmentDataset(data_util.ProcessedDataset):
     y = torch.cat(gold_ys, 0)
     return {
         'prem': {
-          'x': ibp.DiscreteChoiceTensor(prem_vals, prem_choice_mats, prem_choice_masks, prem_masks),
+          'x': ibp.DiscreteChoiceTensorWithUNK(prem_vals, prem_choice_mats, prem_choice_masks, prem_masks),
           'mask': prem_masks, 'lengths': prem_lengths},
         'hypo': {
-          'x': ibp.DiscreteChoiceTensor(hypo_vals, hypo_choice_mats, hypo_choice_masks, hypo_masks),
+          'x': ibp.DiscreteChoiceTensorWithUNK(hypo_vals, hypo_choice_mats, hypo_choice_masks, hypo_masks),
           'mask': hypo_masks, 'lengths': hypo_lengths},
         'y': y}
 
@@ -592,7 +592,7 @@ class DataAugmenter(data_util.DataAugmenter):
       for t in range(self.augment_by):
         x_new = torch.stack([choices[i][random.choice(range(len(choices[i])))]
                              for i in range(len(choices))]).view(1, -1, 1)
-        x_bounded = ibp.DiscreteChoiceTensor(
+        x_bounded = ibp.DiscreteChoiceTensorWithUNK(
             x_new, x_orig.choice_mat, x_orig.choice_mask, x_orig.sequence_mask)
         ex_new = dict(ex)
         ex_new['hypo'] = dict(ex['hypo'])

@@ -31,7 +31,7 @@ class AdversarialModel(nn.Module):
     def __init__(self):
         super(AdversarialModel, self).__init__()
 
-    def query(self, x, vocab, device, return_bounds=False, attack_surface=None):
+    def query(self, x, vocab, device, return_bounds=False, attack_surface=None, perturbation=None):
         """Query the model on a Dataset.
 
         Args:
@@ -43,11 +43,11 @@ class AdversarialModel(nn.Module):
         """
         if isinstance(x, str):
             dataset = TextClassificationDataset.from_raw_data(
-                [(x, 0)], vocab, attack_surface=attack_surface)
+                [(x, 0)], vocab, attack_surface=attack_surface, perturbation=perturbation)
             data = dataset.get_loader(1)
         else:
             dataset = TextClassificationDataset.from_raw_data(
-                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface)
+                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface, perturbation=perturbation)
             data = dataset.get_loader(len(x))
 
         with torch.no_grad():
@@ -122,7 +122,7 @@ class BOWModel(AdversarialModel):
         x_vecs = self.embs(x)  # B, n, d
         if not self.no_wordvec_layer:
             x_vecs = self.linear_input(x_vecs)  # B, n, h
-        if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+        if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
             x_vecs = x_vecs.to_interval_bounded(eps=cert_eps)
         if self.no_wordvec_layer:
             z1 = x_vecs
@@ -198,11 +198,11 @@ class CNNModel(AdversarialModel):
         lengths = batch['lengths']
 
         x_vecs = self.embs(x)  # B, n, d
-        if self.early_ibp and isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+        if self.early_ibp and isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
             x_vecs = x_vecs.to_interval_bounded(eps=cert_eps)
         if not self.no_wordvec_layer:
             x_vecs = self.linear_input(x_vecs)  # B, n, h
-        if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+        if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
             x_vecs = x_vecs.to_interval_bounded(eps=cert_eps)
         if self.no_wordvec_layer or not self.relu_wordvec:
             z = x_vecs
@@ -275,7 +275,7 @@ class LSTMModel(AdversarialModel):
         x_vecs = self.embs(x)  # B, n, d
         if not self.no_wordvec_layer:
             x_vecs = self.linear_input(x_vecs)  # B, n, h
-        if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+        if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
             x_vecs = x_vecs.to_interval_bounded(eps=cert_eps)
         if self.no_wordvec_layer:
             z = x_vecs
@@ -358,27 +358,31 @@ class LSTMDPModel(AdversarialModel):
         B = x.shape[0]
         x_vecs = self.embs(x)  # B, n, d
         z_interval = None
+        unk_mask = None
         if not self.no_wordvec_layer:
             x_vecs = self.linear_input(x_vecs)  # B, n, h
-            if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+            if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
                 x_interval = x_vecs.to_interval_bounded(eps=cert_eps)
+                unk_mask = x_vecs.unk_mask
                 x_vecs = x_vecs.val
                 z_interval = ibp.activation(F.relu, x_interval)  # B, n, h
+
             z = ibp.activation(F.relu, x_vecs)  # B, n, h
         else:
-            if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+            if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
                 x_interval = x_vecs.to_interval_bounded(eps=cert_eps)
                 x_vecs = x_vecs.val
                 z_interval = x_interval
+
             z = x_vecs
 
         h0 = torch.zeros((B, self.hidden_size * (2 if self.bidirectional else 1)), device=self.device)  # B, h
         c0 = torch.zeros((B, self.hidden_size * (2 if self.bidirectional else 1)), device=self.device)  # B, h
         if analysis_mode:
             h_mat, c_mat, lstm_analysis = self.lstm(z, z_interval, (h0, c0), mask=mask,
-                                                    analysis_mode=True)  # B, n, h each
+                                                    analysis_mode=True, unk_mask=unk_mask)  # B, n, h each
         else:
-            h_mat, c_mat = self.lstm(z, z_interval, (h0, c0), mask=mask)  # B, n, h each
+            h_mat, c_mat = self.lstm(z, z_interval, (h0, c0), mask=mask, unk_mask=unk_mask)  # B, n, h each
 
         if self.pool == 'mean':
             h_masked = h_mat * mask.unsqueeze(2)  # only need to mask the state sequence
@@ -408,7 +412,7 @@ class LSTMFinalStateModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTM(word_vec_size, hidden_size, bidirectional=True)
+            self.lstm = ibp.LSTM(word_vec_size, hidden_size)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
             self.lstm = ibp.LSTM(hidden_size, hidden_size)
@@ -437,7 +441,7 @@ class LSTMFinalStateModel(AdversarialModel):
         x_vecs = self.embs(x)  # B, n, d
         if not self.no_wordvec_layer:
             x_vecs = self.linear_input(x_vecs)  # B, n, h
-        if isinstance(x_vecs, ibp.DiscreteChoiceTensor):
+        if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
             x_vecs = x_vecs.to_interval_bounded(eps=cert_eps)
         if self.no_wordvec_layer:
             z = x_vecs
@@ -487,18 +491,8 @@ class ExhaustiveAdversary(Adversary):
 
     def __init__(self, attack_surface, perturbation):
         super(ExhaustiveAdversary, self).__init__(attack_surface)
-        p = eval(perturbation)
-        self.deltas = [0, 0, 0]
-        for tran, delta in p:
-            if tran == Sub:
-                assert attack_surface is not None
-                self.deltas[2] = delta
-            elif tran == Del:
-                self.deltas[0] = delta
-            elif tran == Ins:
-                self.deltas[1] = delta
-            else:
-                raise NotImplementedError
+        self.perturbation = perturbation
+        self.deltas = Perturbation.str2deltas(perturbation)
 
     def run(self, model, dataset, device, opts=None):
         is_correct = []
@@ -507,7 +501,7 @@ class ExhaustiveAdversary(Adversary):
             # First query the example itself
             orig_pred, (orig_lb, orig_ub) = model.query(
                 x, dataset.vocab, device, return_bounds=True,
-                attack_surface=self.attack_surface)
+                attack_surface=self.attack_surface, perturbation=self.perturbation)
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
             print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
                 orig_lb, orig_pred, orig_ub, cert_correct))
@@ -909,7 +903,9 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             all_words = [w.lower() for w in x.split()]
             if perturbation is not None:
                 words = [w for w in all_words if w in vocab]
-                choices = Perturbation(perturbation, words, attack_surface=attack_surface).get_output_for_baseline()
+                choices = Perturbation(perturbation, words,
+                                       attack_surface=attack_surface).get_output_for_baseline_final_state()
+                assert len(words) == len(choices)  # TODO: This does not hold when Ins is considered.
                 # TODO: remove w from choices, and be careful about the DiscreteChoice.val will be outside of the bound.
                 # if include_self:
                 #     choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
@@ -924,11 +920,14 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             word_idxs = [vocab.get_index(w) for w in words]
             x_torch = torch.tensor(word_idxs).view(1, -1, 1)  # (1, T, d)
             if perturbation is not None:
+                unk_mask = torch.tensor([0 if "UNK" in c_list else 1 for c_list in choices],
+                                        dtype=torch.long).unsqueeze(0)  # (1, T)
                 choices_word_idxs = [
-                    torch.tensor([vocab.get_index(c) for c in c_list], dtype=torch.long) for c_list in choices
+                    torch.tensor([vocab.get_index(c) for c in c_list if c != "UNK"], dtype=torch.long) for c_list in
+                    choices
                 ]
-                if any(0 in c.view(-1).tolist() for c in choices_word_idxs):
-                    raise ValueError("UNK tokens found")
+                # if any(0 in c.view(-1).tolist() for c in choices_word_idxs):
+                #     raise ValueError("UNK tokens found")
                 choices_torch = pad_sequence(choices_word_idxs, batch_first=True).unsqueeze(2).unsqueeze(
                     0)  # (1, T, C, 1)
                 choices_mask = (choices_torch.squeeze(-1) != 0).long()  # (1, T, C)
@@ -937,8 +936,10 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             else:
                 choices_torch = x_torch.view(1, -1, 1, 1)  # (1, T, 1, 1)
                 choices_mask = torch.ones_like(x_torch.view(1, -1, 1))
+                unk_mask = None
+
             mask_torch = torch.ones((1, len(word_idxs)))
-            x_bounded = ibp.DiscreteChoiceTensor(x_torch, choices_torch, choices_mask, mask_torch)
+            x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
             y_torch = torch.tensor(y, dtype=torch.float).view(1, 1)
             lengths_torch = torch.tensor(len(word_idxs)).view(1)
             examples.append(dict(x=x_bounded, y=y_torch, mask=mask_torch, lengths=lengths_torch))
@@ -963,18 +964,20 @@ class TextClassificationDataset(data_util.ProcessedDataset):
         y = torch.zeros((B, 1))
         lengths = torch.zeros((B,), dtype=torch.long)
         masks = torch.zeros((B, max_len))
+        unk_masks = torch.zeros((B, max_len))
         for i, ex in enumerate(examples):
             x_vals.append(ex['x'].val)
             choice_mats.append(ex['x'].choice_mat)
             choice_masks.append(ex['x'].choice_mask)
             cur_len = ex['x'].shape[1]
             masks[i, :cur_len] = 1
+            unk_masks[i, :cur_len] = ex['x'].unk_mask[0]
             y[i, 0] = ex['y']
             lengths[i] = ex['lengths'][0]
         x_vals = data_util.multi_dim_padded_cat(x_vals, 0).long()
         choice_mats = data_util.multi_dim_padded_cat(choice_mats, 0).long()
         choice_masks = data_util.multi_dim_padded_cat(choice_masks, 0).long()
-        return {'x': ibp.DiscreteChoiceTensor(x_vals, choice_mats, choice_masks, masks),
+        return {'x': ibp.DiscreteChoiceTensorWithUNK(x_vals, choice_mats, choice_masks, masks, unk_masks),
                 'y': y, 'mask': masks, 'lengths': lengths}
 
 
@@ -1077,10 +1080,11 @@ class DataAugmenter(data_util.DataAugmenter):
                     x_orig.choice_mat[0, i, :, 0], x_orig.choice_mask[0, i, :].type(torch.uint8))
                 choices.append(cur_choices)
             for t in range(self.augment_by):
-                x_new = torch.stack([choices[i][random.choice(range(len(choices[i])))]
-                                     for i in range(len(choices))]).view(1, -1, 1)
-                x_bounded = ibp.DiscreteChoiceTensor(
-                    x_new, x_orig.choice_mat, x_orig.choice_mask, x_orig.sequence_mask)
+                x_word_id = [choices[i][random.choice(range(len(choices[i])))] for i in range(len(choices))]
+                x_new = torch.stack([id for i, id in enumerate(x_word_id)
+                                     if random.rand() < 0.5 or x_orig.unk_mask[i] > 0]).view(1, -1, 1)
+                x_bounded = ibp.DiscreteChoiceTensorWithUNK(
+                    x_new, x_orig.choice_mat, x_orig.choice_mask, x_orig.sequence_mask, torch.ones_like(x_new))
                 ex_new = dict(ex)
                 ex_new['x'] = x_bounded
                 new_examples.append(ex_new)

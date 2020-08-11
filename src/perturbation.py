@@ -88,18 +88,46 @@ class Perturbation:
     def __init__(self, trans, ipt, attack_surface=None, stop_words=None):
         trans = eval(trans)
         self.trans = []
+        self.has_del = False
+        self.has_ins = False
         for tran, delta in trans:
             if tran == Sub:
                 assert attack_surface is not None
                 self.trans.append(Sub(ipt, delta, attack_surface=attack_surface))
             elif tran == Del:
                 self.trans.append(Del(ipt, delta, stop_words=stop_words))
+                self.has_del = delta > 0
             elif tran == Ins:
                 self.trans.append(Ins(ipt, delta))
+                self.has_ins = delta > 0
             else:
                 raise NotImplementedError
 
         self.ipt = ipt
+
+    def get_output_for_baseline_final_state(self):
+        ret = [set() for _ in range(len(self.ipt) * 2)]
+        unk_str = "UNK"
+        for i in range(len(ret)):
+            if i % 2 == 0:
+                ret[i].add(self.ipt[i // 2])
+                for tran in self.trans:
+                    if isinstance(tran, Sub) and tran.phi(i // 2):
+                        choices = tran.transformer(i // 2)
+                        for choice in choices:
+                            ret[i].add(choice[0])
+            else:
+                ret[i].add(unk_str)  # add dummy word for Ins
+            if self.has_del and i % 2 == 0:
+                for tran in self.trans:
+                    if isinstance(tran, Del) and tran.phi(i // 2):
+                        ret[i].add(unk_str)  # add dummy word for Del
+            if self.has_ins and i % 2 == 1:
+                for tran in self.trans:
+                    if isinstance(tran, Ins) and tran.phi(i // 2):
+                        ret[i].add(self.ipt[i // 2])  # add word for Ins
+
+        return [list(x) for x in ret if len(x) > 1 or (unk_str not in x and len(x) == 1)]
 
     def get_output_for_baseline(self):
         ret = [set() for _ in self.ipt]
@@ -148,10 +176,27 @@ class Perturbation:
 
         return [list(x) for x in ret]
 
+    @staticmethod
+    def str2deltas(perturbation):
+        # return deltas for [Del, Ins, Sub]
+        p = eval(perturbation)
+        trans = [Del, Ins, Sub]
+        deltas = [0, 0, 0]
+        for tran, delta in p:
+            idx = trans.index(tran)
+            if idx != -1:
+                deltas[idx] = delta
+            else:
+                raise NotImplementedError
+
+        return deltas
+
 
 def tests():
     sen = ["i", "a", "to", "boys", "you", "tuzi", "a", "y"]
     a = Perturbation("[(Ins, 2), (Del, 2)]", sen)
     print(a.get_output_for_baseline())
+    print(a.get_output_for_baseline_final_state())
+
 
 # tests()
