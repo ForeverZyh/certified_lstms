@@ -363,7 +363,7 @@ class LSTMDPModel(AdversarialModel):
             x_vecs = self.linear_input(x_vecs)  # B, n, h
             if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
                 x_interval = x_vecs.to_interval_bounded(eps=cert_eps)
-                unk_mask = x_vecs.unk_mask
+                unk_mask = x_vecs.unk_mask.to(self.device)
                 x_vecs = x_vecs.val
                 z_interval = ibp.activation(F.relu, x_interval)  # B, n, h
 
