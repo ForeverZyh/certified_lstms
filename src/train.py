@@ -260,6 +260,7 @@ def parse_args():
   parser.add_argument('--unfreeze-wordvec', action='store_true', help="Don't freeze word vectors")
   parser.add_argument('--glove', '-g', choices=vocabulary.GLOVE_CONFIGS, default='840B.300d')
   parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
+  parser.add_argument('--baseline', action='store_true', help="Do baseline robust training, i.e., delta=infty")
   # Adversary
   parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic'],
                       default=None, help='Which adversary to test on')

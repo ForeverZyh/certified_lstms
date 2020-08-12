@@ -99,6 +99,12 @@ class IntervalBoundedTensor(BoundedTensor):
     def repeat(self, *dim):
         return IntervalBoundedTensor(self.val.repeat(*dim), self.lb.repeat(*dim), self.ub.repeat(*dim))
 
+    def view(self, *dim):
+        return IntervalBoundedTensor(self.val.view(*dim), self.lb.view(*dim), self.ub.view(*dim))
+
+    def reshape(self, *dim):
+        return IntervalBoundedTensor(self.val.reshape(*dim), self.lb.reshape(*dim), self.ub.reshape(*dim))
+
     def to(self, device):
         self.val = self.val.to(device)
         self.lb = self.lb.to(device)
@@ -434,15 +440,17 @@ class LSTM(nn.Module):
 class LSTMDP(nn.Module):
     """An LSTM."""
 
-    def __init__(self, input_size, hidden_size, perturbation, bidirectional=False):
+    def __init__(self, input_size, hidden_size, perturbation, bidirectional=False, baseline=False):
         super(LSTMDP, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.perturbation = perturbation
+        self.baseline = baseline
         self.bidirectional = bidirectional
         self.i2h = Linear(input_size, 4 * hidden_size)
         self.h2h = Linear(hidden_size, 4 * hidden_size)
         self.deltas = Perturbation.str2deltas(perturbation)
+        self.deltas_p1 = [delta + 1 for delta in self.deltas]
         if bidirectional:
             self.back_i2h = Linear(input_size, 4 * hidden_size)
             self.back_h2h = Linear(hidden_size, 4 * hidden_size)
@@ -508,12 +516,18 @@ class LSTMDP(nn.Module):
                 unk_mask = unk_mask.flip(1)
 
         B, T, d = x.shape  # batch_first=True
+        D = len(self.deltas)
         idxs = range(T)
         if reverse:
             idxs = idxs[::-1]
         x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
 
         def compute_state(h, c, x_t, mask_t, unk_mask_t):
+            # x_t, mask_t, unk_mask_t can be longer than h, we need to truncate them
+            x_t = x_t[:h.shape[0]]
+            mask_t = mask_t[:h.shape[0]] if mask_t is not None else None
+            unk_mask_t = unk_mask_t[:h.shape[0]] if unk_mask_t is not None else None
+
             if analysis_mode:
                 h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
             else:
@@ -534,14 +548,87 @@ class LSTMDP(nn.Module):
                 return h_t, c_t, i_t, f_t, o_t
             return h_t, c_t
 
-        ans = []
-        for i in range(T):
-            # keep same
-            post_state = compute_state(h, c, output[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
-                                       unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
+        def dup(x):
+            return x.view([B] + [1] * D + [d]).repeat(1, *self.deltas_p1, 1)
 
-            ans.append(post_state)
-            h, c = post_state[0], post_state[1]
+        if self.baseline:
+            ans = []
+            for i in range(T):
+                post_state = compute_state(h, c, output[:, i, :],
+                                           mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                           unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
+
+                ans.append(post_state)
+                h, c = post_state[0], post_state[1]
+        else:
+            h = dup(h)
+            c = dup(c)
+            x = x.repeat(np.prod(self.deltas_p1), 1, 1)
+            output = output.repeat(np.prod(self.deltas_p1), 1, 1)
+            mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
+            unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
+            ans = []
+            for i in range(T):
+                # identity
+                del_extend = None
+                ins_extend = None
+                sub_extend = None
+                # Del
+                if self.deltas[0] > 0:  # Sub, [:,here,:,:,:] (B, Del, Ins, Sub, d)
+                    del_1 = compute_state(h[:, :-1, :, :, :].reshape(-1, d), c[:, :-1, :, :, :].reshape(-1, d)
+                                          , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                          unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
+
+                    del_00 = compute_state(h[:, :1, :, :, :].reshape(-1, d), c[:, :1, :, :, :].reshape(-1, d)
+                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                           None)
+                    del_00_extend = view(del_00, B, 1, self.deltas[1] + 1, self.deltas[2] + 1, d)
+
+                    del_01 = compute_state(h[:, 1:, :, :, :].reshape(-1, d), c[:, 1:, :, :, :].reshape(-1, d)
+                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                           None)
+                    del_extend = view(merge(del_1, del_01), B, self.deltas[0], self.deltas[1] + 1, self.deltas[2] + 1,
+                                      d)
+                    del_extend = tuple([cat([s, t], dim=1) for s, t in zip(del_00_extend, del_extend)])
+
+                # Ins
+                if self.deltas[1] > 0:  # Ins, [:,:,here,:,:] (B, Del, Ins, Sub, d)
+                    raise NotImplementedError
+
+                if self.deltas[2] > 0:  # Sub, [:,:,:,here,:] (B, Del, Ins, Sub, d)
+                    sub_1 = compute_state(h[:, :, :, :-1, :].reshape(-1, d), c[:, :, :, :-1, :].reshape(-1, d)
+                                          , output[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                          None)
+
+                    sub_00 = compute_state(h[:, :, :, :1, :].reshape(-1, d), c[:, :, :, :1, :].reshape(-1, d)
+                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                           None)
+                    sub_00_extend = view(sub_00, B, self.deltas[0] + 1, self.deltas[1] + 1, 1, d)
+
+                    sub_01 = compute_state(h[:, :, :, 1:, :].reshape(-1, d), c[:, :, :, 1:, :].reshape(-1, d)
+                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                           None)
+                    sub_extend = view(merge(sub_1, sub_01), B, self.deltas[0] + 1, self.deltas[1] + 1, self.deltas[2],
+                                      d)
+                    sub_extend = tuple([cat([s, t], dim=3) for s, t in zip(sub_00_extend, sub_extend)])
+
+                extends = [del_extend, ins_extend, sub_extend]
+                extend = None
+                for tran_extend in extends:
+                    if extend is None:
+                        extend = tran_extend
+                    elif tran_extend is not None:
+                        extend = merge(extend, tran_extend)
+
+                assert extend is not None
+                h, c = extend[0], extend[1]
+                # print((h.ub - h.lb).sum())
+
+                post_state = view(extend, -1, d)  # [-1, d]
+                ans_t = tuple([t[:B, :] for t in post_state])
+                for j in range(B, post_state[0].shape[0], B):
+                    ans_t = tuple([t.merge(t_[j:j + B]) for t, t_ in zip(ans_t, post_state)])
+                ans.append(ans_t)
 
         ret = [[] for _ in range(len(ans[0]))]
         for i in idxs:
@@ -1003,6 +1090,13 @@ def merge(X1: tuple, X2: tuple):
     ret = ()
     for (x1, x2) in zip(X1, X2):
         ret += (x1.merge(x2),)
+    return ret
+
+
+def view(X: tuple, *dims):
+    ret = ()
+    for x in X:
+        ret += (x.view(dims),)
     return ret
 
 

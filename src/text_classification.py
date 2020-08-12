@@ -313,7 +313,7 @@ class LSTMDPModel(AdversarialModel):
     """
 
     def __init__(self, word_vec_size, hidden_size, word_mat, device, pool='max', dropout=0.2,
-                 no_wordvec_layer=False, bidirectional=True, perturbation=None):
+                 no_wordvec_layer=False, bidirectional=True, perturbation=None, baseline=False):
         super(LSTMDPModel, self).__init__()
         assert perturbation is not None
         # TODO: to implement more discrete perturbation space
@@ -327,10 +327,12 @@ class LSTMDPModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, perturbation, bidirectional=bidirectional)
+            self.lstm = ibp.LSTMDP(word_vec_size, hidden_size, perturbation, bidirectional=bidirectional,
+                                   baseline=baseline)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
-            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, perturbation, bidirectional=bidirectional)
+            self.lstm = ibp.LSTMDP(hidden_size, hidden_size, perturbation, bidirectional=bidirectional,
+                                   baseline=baseline)
         self.dropout = ibp.Dropout(dropout)
         if bidirectional:
             self.fc_hidden = ibp.Linear(hidden_size * 2, hidden_size)
@@ -842,7 +844,7 @@ def load_model(word_mat, device, opts):
         model = LSTMDPModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
-            perturbation=opts.perturbation, bidirectional=not opts.no_bidirectional).to(device)
+            perturbation=opts.perturbation, bidirectional=not opts.no_bidirectional, baseline=opts.baseline).to(device)
     elif opts.model == 'lstm-final-state':
         model = LSTMFinalStateModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
