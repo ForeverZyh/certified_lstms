@@ -499,7 +499,7 @@ class ExhaustiveAdversary(Adversary):
     def run(self, model, dataset, device, opts=None):
         is_correct = []
         adv_exs = []
-        for x, y in dataset.raw_data:
+        for x, y in tqdm(dataset.raw_data):
             # First query the example itself
             orig_pred, (orig_lb, orig_ub) = model.query(
                 x, dataset.vocab, device, return_bounds=True,
