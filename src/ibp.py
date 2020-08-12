@@ -523,10 +523,11 @@ class LSTMDP(nn.Module):
         x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
 
         def compute_state(h, c, x_t, mask_t, unk_mask_t):
-            # x_t, mask_t, unk_mask_t can be longer than h, we need to truncate them
-            x_t = x_t[:h.shape[0]]
-            mask_t = mask_t[:h.shape[0]] if mask_t is not None else None
-            unk_mask_t = unk_mask_t[:h.shape[0]] if unk_mask_t is not None else None
+            if not self.baseline:
+                # x_t, mask_t, unk_mask_t can be longer than h, we need to truncate them
+                x_t = x_t[:h.shape[0]]
+                mask_t = mask_t[:h.shape[0]] if mask_t is not None else None
+                unk_mask_t = unk_mask_t[:h.shape[0]] if unk_mask_t is not None else None
 
             if analysis_mode:
                 h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
@@ -551,8 +552,8 @@ class LSTMDP(nn.Module):
         def dup(x):
             return x.view([B] + [1] * D + [d]).repeat(1, *self.deltas_p1, 1)
 
+        ans = []
         if self.baseline:
-            ans = []
             for i in range(T):
                 post_state = compute_state(h, c, output[:, i, :],
                                            mask[:, i].unsqueeze(-1) if mask is not None else None,
@@ -567,7 +568,6 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
-            ans = []
             for i in range(T):
                 # identity
                 del_extend = None
