@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import copy
 from functools import partial
 
-
+UNK = "_UNK_"
 class Transformation(ABC):
     def __init__(self, s, t, ipt, delta):
         """
@@ -107,7 +107,6 @@ class Perturbation:
 
     def get_output_for_baseline_final_state(self):
         ret = [set() for _ in range(len(self.ipt) * 2)]
-        unk_str = "UNK"
         for i in range(len(ret)):
             if i % 2 == 0:
                 ret[i].add(self.ipt[i // 2])
@@ -117,17 +116,17 @@ class Perturbation:
                         for choice in choices:
                             ret[i].add(choice[0])
             else:
-                ret[i].add(unk_str)  # add dummy word for Ins
+                ret[i].add(UNK)  # add dummy word for Ins
             if self.has_del and i % 2 == 0:
                 for tran in self.trans:
                     if isinstance(tran, Del) and tran.phi(i // 2):
-                        ret[i].add(unk_str)  # add dummy word for Del
+                        ret[i].add(UNK)  # add dummy word for Del
             if self.has_ins and i % 2 == 1:
                 for tran in self.trans:
                     if isinstance(tran, Ins) and tran.phi(i // 2):
                         ret[i].add(self.ipt[i // 2])  # add word for Ins
 
-        return [list(x) for x in ret if len(x) > 1 or (unk_str not in x and len(x) == 1)]
+        return [list(x) for x in ret if len(x) > 1 or (UNK not in x and len(x) == 1)]
 
     def get_output_for_baseline(self):
         ret = [set() for _ in self.ipt]

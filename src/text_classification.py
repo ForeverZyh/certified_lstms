@@ -14,17 +14,19 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
+import tensorflow_datasets as tfds
 
 import attacks
 import data_util
 import ibp
 import vocabulary
-from perturbation import Perturbation, Sub, Ins, Del
+from perturbation import Perturbation, Sub, Ins, Del, UNK
 
 LOSS_FUNC = nn.BCEWithLogitsLoss()
 IMDB_DIR = 'data/aclImdb'
 LM_FILE = 'data/lm_scores/imdb_all.txt'
 COUNTER_FITTED_FILE = 'data/counter-fitted-vectors.txt'
+SST2_DIR = 'data/sst2'
 
 
 class AdversarialModel(nn.Module):
@@ -741,7 +743,14 @@ def load_datasets(device, opts):
       - word_mat: torch.Tensor
       - attack_surface: AttackSurface - defines the adversarial attack surface
     """
-    data_class = ToyClassificationDataset if opts.use_toy_data else IMDBDataset
+    if opts.use_toy_data:
+        data_class = ToyClassificationDataset
+    elif opts.dataset == "Imdb":
+        data_class = IMDBDataset
+    elif opts.dataset == "SST2":
+        data_class = SST2Dataset
+    else:
+        raise NotImplementedError
     try:
         with open(os.path.join(opts.data_cache_dir, 'train_data.pkl'), 'rb') as infile:
             train_data = pickle.load(infile)
@@ -762,11 +771,18 @@ def load_datasets(device, opts):
         elif opts.use_lm:
             attack_surface = attacks.LMConstrainedAttackSurface.from_files(
                 opts.neighbor_file, opts.imdb_lm_file)
+        elif opts.use_a3t_settings:
+            attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(opts.pddb_file)
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')
-        raw_data = data_class.get_raw_data(opts.imdb_dir, test=opts.test)
-        word_set = raw_data.get_word_set(attack_surface)
+        if opts.dataset == "Imdb":
+            raw_data = data_class.get_raw_data(opts.imdb_dir, test=opts.test)
+        elif opts.dataset == "SST2":
+            raw_data = data_class.get_raw_data(opts.sst2_dir, test=opts.test)
+        else:
+            raise NotImplementedError
+        word_set = raw_data.get_word_set(attack_surface, use_counter_vocab=not opts.use_a3t_settings)
         vocab, word_mat = vocabulary.Vocabulary.read_word_vecs(word_set, opts.glove_dir, opts.glove, device)
         train_data = data_class.from_raw_data(raw_data.train_data, vocab, attack_surface,
                                               downsample_to=opts.downsample_to,
@@ -856,7 +872,7 @@ def load_model(word_mat, device, opts):
             else:
                 load_fn = os.path.join(opts.load_dir, 'model-checkpoint-%d.pth' % opts.load_ckpt)
             print('Loading model from %s.' % load_fn)
-            state_dict = dict(torch.load(load_fn))
+            state_dict = dict(torch.load(load_fn, map_location=torch.device('cpu')))
             state_dict['embs.weight'] = model.embs.weight
             model.load_state_dict(state_dict)
             print('Finished loading model.')
@@ -870,7 +886,7 @@ class RawClassificationDataset(data_util.RawDataset):
     Dataset that only holds x,y as (str, str) tuples
     """
 
-    def get_word_set(self, attack_surface):
+    def get_word_set(self, attack_surface, use_counter_vocab=True):
         with open(COUNTER_FITTED_FILE) as f:
             counter_vocab = set([line.split(' ')[0] for line in f])
         word_set = set()
@@ -887,7 +903,10 @@ class RawClassificationDataset(data_util.RawDataset):
                 # For now, ignore things not in attack surface
                 # If we really need them, later code will throw an error
                 pass
-        return word_set & counter_vocab
+        if use_counter_vocab:
+            return word_set & counter_vocab
+        else:
+            return word_set
 
 
 class TextClassificationDataset(data_util.ProcessedDataset):
@@ -906,6 +925,7 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             if perturbation is not None:
                 perturb = Perturbation(perturbation, all_words, vocab, attack_surface=attack_surface)
                 choices = perturb.get_output_for_baseline_final_state()
+                choices = [[x for x in choice if x == UNK or x in vocab] for choice in choices]
                 words = perturb.ipt
                 assert len(words) == len(choices)  # TODO: This does not hold when Ins is considered.
                 # TODO: remove w from choices, and be careful about the DiscreteChoice.val will be outside of the bound.
@@ -922,10 +942,10 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             word_idxs = [vocab.get_index(w) for w in words]
             x_torch = torch.tensor(word_idxs).view(1, -1, 1)  # (1, T, d)
             if perturbation is not None:
-                unk_mask = torch.tensor([0 if "UNK" in c_list else 1 for c_list in choices],
+                unk_mask = torch.tensor([0 if UNK in c_list else 1 for c_list in choices],
                                         dtype=torch.long).unsqueeze(0)  # (1, T)
                 choices_word_idxs = [
-                    torch.tensor([vocab.get_index(c) for c in c_list if c != "UNK"], dtype=torch.long) for c_list in
+                    torch.tensor([vocab.get_index(c) for c in c_list if c != UNK], dtype=torch.long) for c_list in
                     choices
                 ]
                 # if any(0 in c.view(-1).tolist() for c in choices_word_idxs):
@@ -1067,6 +1087,71 @@ class IMDBDataset(TextClassificationDataset):
             dev_data = cls.read_text(imdb_dir, 'test')
         else:
             dev_data = cls.read_text(imdb_dir, 'dev')
+        return RawClassificationDataset(train_data, dev_data)
+
+
+class SST2Dataset(TextClassificationDataset):
+    """
+    Dataset that holds the IMDB sentiment classification data
+    """
+
+    @classmethod
+    def read_text(cls, sst2_dir, split):
+
+        def prepare_ds(ds):
+            data = []
+            num_pos = 0
+            num_neg = 0
+            num_words = 0
+            for features in tfds.as_numpy(ds):
+                sentence, label = features["sentence"], features["label"]
+                tokens = word_tokenize(sentence.decode('UTF-8'))
+                data.append((' '.join(tokens), label))
+                num_pos += label == 1
+                num_neg += label == 0
+                num_words += len(tokens)
+
+            avg_words = num_words / len(data)
+            print('Read %d examples (+%d, -%d), average length %d words' % (
+                len(data), num_pos, num_neg, avg_words))
+            return data
+
+        def prepare_test_ds(ds):
+            data = []
+            num_pos = 0
+            num_neg = 0
+            num_words = 0
+            for features in ds:
+                features = features.strip()
+                sentence, label = features[2:], features[:1]
+                label = int(label)
+                tokens = word_tokenize(sentence)
+                data.append((' '.join(tokens), label))
+                num_pos += label == 1
+                num_neg += label == 0
+                num_words += len(tokens)
+
+            avg_words = num_words / len(data)
+            print('Read %d examples (+%d, -%d), average length %d words' % (
+                len(data), num_pos, num_neg, avg_words))
+            return data
+
+        if split == "train":
+            ds_train = tfds.load(name="glue/sst2", split="train", shuffle_files=False)
+            return prepare_ds(ds_train)
+        elif split == "test":
+            return prepare_test_ds(open(os.path.join(sst2_dir, "sst2test.txt")).readlines())
+        else:
+            ds_val = tfds.load(name="glue/sst2", split="validation", shuffle_files=False)
+            return prepare_ds(ds_val)
+
+    @classmethod
+    def get_raw_data(cls, sst2_dir, test=False):
+        train_data = cls.read_text(sst2_dir, 'train')
+        if test:
+            dev_data = cls.read_text(sst2_dir, 'test')
+        else:
+            dev_data = cls.read_text(sst2_dir, 'dev')
         return RawClassificationDataset(train_data, dev_data)
 
 

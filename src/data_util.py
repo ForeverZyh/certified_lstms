@@ -7,6 +7,7 @@ import random
 
 
 NEIGHBOR_FILE = 'data/counterfitted_neighbors.json'
+PDDB_FILE = "data/pddb"
 
 
 def dict_batch_to_device(batch, device):

@@ -2,6 +2,10 @@
 import collections
 import json
 import sys
+import os
+import numpy as np
+
+from nltk import pos_tag
 
 OPTS = None
 
@@ -24,8 +28,69 @@ class WordSubstitutionAttackSurface(AttackSurface):
   def get_swaps(self, words):
     swaps = []
     for i in range(len(words)):
-      if words[i] in self.neighbors: 
+      if words[i] in self.neighbors:
         swaps.append(self.neighbors[words[i]])
+      else:
+        swaps.append([])
+    return swaps
+
+class A3TWordSubstitutionAttackSurface(AttackSurface):
+  synonym_dict = {}
+  synonym_dict_pos_tag = {}
+  def __init__(self):
+    pass
+
+  @classmethod
+  def from_file(cls, pddb_path):
+    try:
+      A3TWordSubstitutionAttackSurface.synonym_dict = dict(
+        np.load(os.path.join(pddb_path, 'synonym_dict.npy'), allow_pickle=True).item())
+      A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag = dict(
+        np.load(os.path.join(pddb_path, 'synonym_dict_pos_tag.npy'), allow_pickle=True).item())
+      print("Loading cached synonym_dict success!")
+      return cls()
+    except:
+      pass
+
+    A3TWordSubstitutionAttackSurface.synonym_dict = {}
+    A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag = {}
+    pddb_files = [f for f in os.listdir(pddb_path) if os.path.isfile(os.path.join(pddb_path, f)) and f[:4] == "ppdb"]
+    if len(pddb_files) == 0:
+      raise AttributeError("No PPDB files found in %s" % pddb_path)
+    else:
+      pddb_file = pddb_files[0]
+      print("Using ", pddb_files, " ...")
+
+    lines = open(os.path.join(pddb_path, pddb_file)).readlines()
+    for line in lines:
+      tmp = line.strip().split(" ||| ")
+      pos_tag, x, y = tmp[0][1:-1], tmp[1], tmp[2]
+      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(x, y, pos_tag)
+      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(y, x, pos_tag)
+
+    np.save(os.path.join(pddb_path, 'synonym_dict.npy'), A3TWordSubstitutionAttackSurface.synonym_dict)
+    np.save(os.path.join(pddb_path, 'synonym_dict_pos_tag.npy'), A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag)
+    print("Loading synonym_dict success!")
+    return cls()
+
+  @staticmethod
+  def synonym_dict_add_str(x, y, pos_tag):
+    if x not in A3TWordSubstitutionAttackSurface.synonym_dict:
+      A3TWordSubstitutionAttackSurface.synonym_dict[x] = [y]
+      A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag[x] = [pos_tag]
+    else:
+      A3TWordSubstitutionAttackSurface.synonym_dict[x].append(y)
+      A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag[x].append(pos_tag)
+
+  def get_swaps(self, words):
+    pos_tags = pos_tag(words)
+    swaps = []
+    for i in range(len(words)):
+      if words[i] in A3TWordSubstitutionAttackSurface.synonym_dict:
+        synonyms = A3TWordSubstitutionAttackSurface.synonym_dict[words[i]]
+        synonyms_pos_tag = A3TWordSubstitutionAttackSurface.synonym_dict_pos_tag[words[i]]
+        synonyms = list(set([x for (x, y) in zip(synonyms, synonyms_pos_tag) if y == pos_tags[i][1]]))
+        swaps.append(synonyms)
       else:
         swaps.append([])
     return swaps

@@ -268,6 +268,7 @@ def parse_args():
   parser.add_argument('--adv-num-tries', type=int, default=2)
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
+  parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
   parser.add_argument('--perturbation', type=str, default=None)
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
@@ -295,12 +296,15 @@ def parse_args():
   parser.add_argument('--augment-by', type=int, default=0,
                       help='How many augmented examples per real example')
   # Data and files
+  parser.add_argument('--dataset', choices=['SST2', 'Imdb', 'snli'], default=None)
   parser.add_argument('--adv-only', action='store_true', help='Only run the adversary against the model on the given evaluation set')
   parser.add_argument('--test', action='store_true', help='Evaluate on test set')
   parser.add_argument('--data-cache-dir', '-D', help='Where to load cached dataset and glove')
   parser.add_argument('--neighbor-file', type=str, default=data_util.NEIGHBOR_FILE)
+  parser.add_argument('--pddb-file', type=str, default=data_util.PDDB_FILE)
   parser.add_argument('--glove-dir', type=str, default=vocabulary.GLOVE_DIR)
   parser.add_argument('--imdb-dir', type=str, default=text_classification.IMDB_DIR)
+  parser.add_argument('--sst2-dir', type=str, default=text_classification.SST2_DIR)
   parser.add_argument('--snli-dir', type=str, default=entailment.SNLI_DIR)
   parser.add_argument('--imdb-lm-file', type=str, default=text_classification.LM_FILE)
   parser.add_argument('--snli-lm-file', type=str, default=entailment.LM_FILE)

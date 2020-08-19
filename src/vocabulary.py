@@ -14,6 +14,7 @@ NULL_INDEX = 1
 GLOVE_DIR = 'data/glove'
 GLOVE_CONFIGS = {
     '6B.50d': {'size': 50, 'lines': 400000},
+    '6B.300d': {'size': 300, 'lines': 400000},
     '840B.300d': {'size': 300, 'lines': 2196017}
 }
 
