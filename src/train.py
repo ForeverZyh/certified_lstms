@@ -14,6 +14,7 @@ import data_util
 import entailment
 import text_classification
 import vocabulary
+from perturbation import Perturbation
 
 
 # Maps string keys to modules that hold the relevant functions for training against
@@ -27,10 +28,11 @@ TASK_CLASSES = {
 def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
           cert_frac=0.0, initial_cert_frac=0.0, cert_eps=1.0, initial_cert_eps=0.0, non_cert_train_epochs=0, full_train_epochs=0,
           batch_size=1, epochs_per_save=1, augmenter=None, clip_grad_norm=0, weight_decay=0,
-          save_best_only=False):
+          save_best_only=False, attack_surface=None):
   print('Training model')
   sys.stdout.flush()
   loss_func = task_class.LOSS_FUNC
+  loss_func_keep_dim = task_class.LOSS_FUNC_KEEP_DIM
   optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
   zero_stats = {'epoch': 0, 'clean_acc': 0.0, 'cert_acc': 0.0}
   if augmenter:
@@ -68,6 +70,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   # Linearly increase the weight of adversarial loss over all the epochs to end up at the final desired fraction
   cert_schedule = torch.tensor(np.linspace(initial_cert_frac, cert_frac, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
   eps_schedule = torch.tensor(np.linspace(initial_cert_eps, cert_eps, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
+  aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
   for t in range(num_epochs):
     model.train()
     if t < non_cert_train_epochs:
@@ -94,6 +97,34 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
     with tqdm(data) as batch_loop:
       for batch_idx, batch in enumerate(batch_loop):
         batch = data_util.dict_batch_to_device(batch, device)
+        if OPTS.aug_perturbation is not None:
+          batch_len = len(batch['y'])
+          with torch.no_grad():
+            raw_data = []
+            for i in range(batch_len):
+              words = [train_data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
+                       if int(word_id[0]) > 0]
+              raw_data.append((' '.join(words), int(batch['y'][i][0])))
+              dummy_choice = [[] for _ in words]
+              worst = [(' '.join(words), -1e10) for _ in range(OPTS.eaugment_by)]
+              for batch_x in text_classification.ExhaustiveAdversary.DelDupSubWord(*aug_deltas, words, dummy_choice,
+                                                                                   batch_size=batch_size):
+                all_raw = [' '.join(x_new) for x_new in batch_x]
+                logits = model.query(all_raw, train_data.vocab, device)
+                losses = loss_func_keep_dim(logits, batch['y'].new_full((len(all_raw), 1), batch['y'][i][0]))
+                for x_new, loss in zip(all_raw, losses):
+                  bubble = (x_new, loss)
+                  for j in range(len(worst)):
+                    if worst[j][1] < bubble[1]:
+                      worst[j], bubble = bubble, worst[j]
+
+              for x_new, _ in worst:
+                raw_data.append((x_new, int(batch['y'][i][0])))
+
+            dataset = text_classification.TextClassificationDataset.from_raw_data(
+                raw_data, train_data.vocab, attack_surface=attack_surface, perturbation=OPTS.perturbation)
+            batch = next(iter(dataset.get_loader(len(raw_data))))
+
         optimizer.zero_grad()
         if cur_cert_frac > 0.0:
           out = model.forward(batch, cert_eps=cur_cert_eps)
@@ -143,9 +174,9 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
       if augmenter:
         all_epoch_stats['acc']['dev']['aug'].append(dev_results['aug_acc'])
       dev_stats = {
-          'epoch': t, 
-          'loss': dev_results['loss'], 
-          'clean_acc': dev_results['clean_acc'], 
+          'epoch': t,
+          'loss': dev_results['loss'],
+          'clean_acc': dev_results['clean_acc'],
           'cert_acc': dev_results['cert_acc']
       }
       if augmenter:
@@ -178,7 +209,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
       json.dump(epoch, outfile)
     with open(os.path.join(OPTS.out_dir, "all_epoch_stats.json"), "w") as outfile:
       json.dump(all_epoch_stats, outfile)
-    if ((save_best_only and is_best) 
+    if ((save_best_only and is_best)
         or (not save_best_only and epochs_per_save and (t+1) % epochs_per_save == 0)
         or t == num_epochs - 1):
       if save_best_only and is_best:
@@ -270,6 +301,7 @@ def parse_args():
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
   parser.add_argument('--perturbation', type=str, default=None)
+  parser.add_argument('--aug-perturbation', type=str, default=None)
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
@@ -295,6 +327,8 @@ def parse_args():
                       help='Only save best dev epochs (based on cert acc if cert_frac > 0, clean acc else)')
   parser.add_argument('--augment-by', type=int, default=0,
                       help='How many augmented examples per real example')
+  parser.add_argument('--eaugment-by', type=int, default=0,
+                      help='How many exhaustively augmented examples per real example')
   # Data and files
   parser.add_argument('--dataset', choices=['SST2', 'Imdb', 'snli'], default=None)
   parser.add_argument('--adv-only', action='store_true', help='Only run the adversary against the model on the given evaluation set')
@@ -361,11 +395,11 @@ def main():
           dev_data=dev_data, cert_frac=OPTS.cert_frac, initial_cert_frac=OPTS.initial_cert_frac,
           cert_eps=OPTS.cert_eps, initial_cert_eps=OPTS.initial_cert_eps, batch_size=OPTS.batch_size,
           epochs_per_save=OPTS.epochs_per_save, augmenter=augmenter, clip_grad_norm=OPTS.clip_grad_norm,
-          weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs, non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only)
+          weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs, non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only, attack_surface=attack_surface)
     print('Training finished.')
   print('Testing model.')
   if not OPTS.adv_only:
-    train_results = test(task_class, model, 'Train', train_data, device, 
+    train_results = test(task_class, model, 'Train', train_data, device,
                          batch_size=OPTS.batch_size)
     adversary = None
     if OPTS.adversary == 'exhaustive':
@@ -376,7 +410,7 @@ def main():
     elif OPTS.adversary == 'genetic':
       adversary = task_class.GeneticAdversary(attack_surface, num_iters=OPTS.adv_num_epochs,
                                               pop_size=OPTS.adv_pop_size)
-    dev_results = test(task_class, model, 'Dev', dev_data, device, 
+    dev_results = test(task_class, model, 'Dev', dev_data, device,
                        adversary=adversary, batch_size=OPTS.batch_size)
     results = {
         'train': train_results,

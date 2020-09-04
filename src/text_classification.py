@@ -23,6 +23,7 @@ import vocabulary
 from perturbation import Perturbation, Sub, Ins, Del, UNK
 
 LOSS_FUNC = nn.BCEWithLogitsLoss()
+LOSS_FUNC_KEEP_DIM = nn.BCEWithLogitsLoss(reduction="none")
 IMDB_DIR = 'data/aclImdb'
 LM_FILE = 'data/lm_scores/imdb_all.txt'
 COUNTER_FITTED_FILE = 'data/counter-fitted-vectors.txt'
@@ -525,7 +526,7 @@ class ExhaustiveAdversary(Adversary):
             choices = [cur_swaps for w, cur_swaps in zip(words, swaps)]
 
             is_correct_single = True
-            for batch_x in self.DelDupSubWord(*self.deltas, words, choices):
+            for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
@@ -544,7 +545,8 @@ class ExhaustiveAdversary(Adversary):
 
         return is_correct, adv_exs
 
-    def DelDupSubWord(self, a, b, c, x, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
+    @staticmethod
+    def DelDupSubWord(a, b, c, x, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
         end_pos = len(x)
 
         valid_sub_poss = [i for i in range(end_pos) if len(choices[i]) > 0]
