@@ -516,7 +516,8 @@ class LSTMDP(nn.Module):
             if unk_mask is not None:
                 unk_mask = unk_mask.flip(1)
 
-        B, T, d = x.shape  # batch_first=True
+        B, T, _ = x.shape  # batch_first=True
+        d = self.hidden_size
         D = len(self.deltas)
         idxs = range(T)
         if reverse:
@@ -551,7 +552,7 @@ class LSTMDP(nn.Module):
             return h_t, c_t
 
         def dup(x):
-            return x.view([1] * D + [B, d]).repeat(*self.deltas_p1, 1, 1)
+            return x.view([1] * D + [B, -1]).repeat(*self.deltas_p1, 1, 1)
 
         ans = []
         if self.baseline:
@@ -575,7 +576,7 @@ class LSTMDP(nn.Module):
                 ins_extend = None
                 sub_extend = None
                 # Del
-                if self.deltas[0] > 0:  # Sub, [here,:,:,:,:] (Del, Ins, Sub,B, d)
+                if self.deltas[0] > 0:  # Sub, [here,:,:,:,:] (Del, Ins, Sub, B, d)
                     del_1 = compute_state(h[:-1, :, :, :, :].reshape(-1, d), c[:-1, :, :, :, :].reshape(-1, d)
                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
                                           unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
@@ -593,7 +594,7 @@ class LSTMDP(nn.Module):
                     del_extend = tuple([cat([s, t], dim=0) for s, t in zip(del_00_extend, del_extend)])
 
                 # Ins
-                if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub,B, d)
+                if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub, B, d)
                     raise NotImplementedError
 
                 if self.deltas[2] > 0:  # Sub, [:,:,here,:,:] (Del, Ins, Sub, B, d)

@@ -941,6 +941,8 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 words = [w for w in all_words if w in vocab]  # Delete UNK words
             if truncate_to:
                 words = words[:truncate_to]
+            if len(words) == 0:
+                continue
             word_idxs = [vocab.get_index(w) for w in words]
             x_torch = torch.tensor(word_idxs).view(1, -1, 1)  # (1, T, d)
             if perturbation is not None:
