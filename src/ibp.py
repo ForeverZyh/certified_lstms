@@ -179,6 +179,7 @@ class DiscreteChoiceTensorWithUNK(BoundedTensor):
         self.choice_mat = self.choice_mat.to(device)
         self.choice_mask = self.choice_mask.to(device)
         self.sequence_mask = self.sequence_mask.to(device)
+        self.unk_mask = self.unk_mask.to(device)
         return self
 
 

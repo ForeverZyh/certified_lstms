@@ -961,6 +961,8 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 unk_mask = None
 
             mask_torch = torch.ones((1, len(word_idxs)))
+            if unk_mask is None:
+                unk_mask = torch.ones((1, len(word_idxs)))
             x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
             y_torch = torch.tensor(y, dtype=torch.float).view(1, 1)
             lengths_torch = torch.tensor(len(word_idxs)).view(1)
