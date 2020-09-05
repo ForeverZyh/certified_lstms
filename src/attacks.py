@@ -41,17 +41,7 @@ class A3TWordSubstitutionAttackSurface(AttackSurface):
     self.synonym_dict_pos_tag = synonym_dict_pos_tag
 
   @classmethod
-  def from_file(cls, pddb_path):
-    try:
-      synonym_dict = dict(
-        np.load(os.path.join(pddb_path, 'synonym_dict.npy'), allow_pickle=True).item())
-      synonym_dict_pos_tag = dict(
-        np.load(os.path.join(pddb_path, 'synonym_dict_pos_tag.npy'), allow_pickle=True).item())
-      print("Loading cached synonym_dict success!")
-      return cls(synonym_dict, synonym_dict_pos_tag)
-    except:
-      pass
-
+  def from_file(cls, pddb_path, use_fewer_sub):
     synonym_dict = {}
     synonym_dict_pos_tag = {}
     pddb_files = [f for f in os.listdir(pddb_path) if os.path.isfile(os.path.join(pddb_path, f)) and f[:4] == "ppdb"]
@@ -65,20 +55,20 @@ class A3TWordSubstitutionAttackSurface(AttackSurface):
     for line in lines:
       tmp = line.strip().split(" ||| ")
       pos_tag, x, y = tmp[0][1:-1], tmp[1], tmp[2]
-      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, x, y, pos_tag)
-      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, y, x, pos_tag)
+      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, x, y, pos_tag,
+                                                            use_fewer_sub)
+      A3TWordSubstitutionAttackSurface.synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, y, x, pos_tag,
+                                                            use_fewer_sub)
 
-    np.save(os.path.join(pddb_path, 'synonym_dict.npy'), synonym_dict)
-    np.save(os.path.join(pddb_path, 'synonym_dict_pos_tag.npy'), synonym_dict_pos_tag)
-    print("Loading synonym_dict success!")
+    print("Compute synonym_dict success!")
     return cls(synonym_dict, synonym_dict_pos_tag)
 
   @staticmethod
-  def synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, x, y, pos_tag):
+  def synonym_dict_add_str(synonym_dict, synonym_dict_pos_tag, x, y, pos_tag, use_fewer_sub):
     if x not in synonym_dict:
       synonym_dict[x] = [y]
       synonym_dict_pos_tag[x] = [pos_tag]
-    else:
+    elif not use_fewer_sub:
       synonym_dict[x].append(y)
       synonym_dict_pos_tag[x].append(pos_tag)
 

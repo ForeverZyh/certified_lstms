@@ -774,7 +774,7 @@ def load_datasets(device, opts):
             attack_surface = attacks.LMConstrainedAttackSurface.from_files(
                 opts.neighbor_file, opts.imdb_lm_file)
         elif opts.use_a3t_settings:
-            attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(opts.pddb_file)
+            attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(opts.pddb_file, opts.use_fewer_sub)
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')

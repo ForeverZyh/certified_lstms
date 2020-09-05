@@ -24,6 +24,35 @@ TASK_CLASSES = {
   'entailment': entailment
 }
 
+def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_surface, loss_func_keep_dim):
+  batch_len = len(batch['y'])
+  with torch.no_grad():
+    raw_data = []
+    for i in range(batch_len):
+      words = [data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
+               if int(word_id[0]) > 0]
+      raw_data.append((' '.join(words), int(batch['y'][i][0])))
+      dummy_choice = [[] for _ in words]
+      worst = [(' '.join(words), -1e10) for _ in range(OPTS.eaugment_by)]
+      for batch_x in text_classification.ExhaustiveAdversary.DelDupSubWord(*aug_deltas, words, dummy_choice,
+                                                                           batch_size=batch_size):
+        all_raw = [' '.join(x_new) for x_new in batch_x]
+        logits = model.query(all_raw, data.vocab, device)
+        losses = loss_func_keep_dim(logits, batch['y'].new_full((len(all_raw), 1), batch['y'][i][0]))
+        for x_new, loss in zip(all_raw, losses):
+          bubble = (x_new, loss)
+          for j in range(len(worst)):
+            if worst[j][1] < bubble[1]:
+              worst[j], bubble = bubble, worst[j]
+
+      for x_new, _ in worst:
+        raw_data.append((x_new, int(batch['y'][i][0])))
+
+    dataset = text_classification.TextClassificationDataset.from_raw_data(
+      raw_data, data.vocab, attack_surface=attack_surface, perturbation=OPTS.perturbation)
+
+    return next(iter(dataset.get_loader(len(raw_data))))
+
 
 def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
           cert_frac=0.0, initial_cert_frac=0.0, cert_eps=1.0, initial_cert_eps=0.0, non_cert_train_epochs=0, full_train_epochs=0,
@@ -98,34 +127,11 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
       for batch_idx, batch in enumerate(batch_loop):
         batch = data_util.dict_batch_to_device(batch, device)
         if OPTS.aug_perturbation is not None:
-          batch_len = len(batch['y'])
-          with torch.no_grad():
-            raw_data = []
-            for i in range(batch_len):
-              words = [train_data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
-                       if int(word_id[0]) > 0]
-              raw_data.append((' '.join(words), int(batch['y'][i][0])))
-              dummy_choice = [[] for _ in words]
-              worst = [(' '.join(words), -1e10) for _ in range(OPTS.eaugment_by)]
-              for batch_x in text_classification.ExhaustiveAdversary.DelDupSubWord(*aug_deltas, words, dummy_choice,
-                                                                                   batch_size=batch_size):
-                all_raw = [' '.join(x_new) for x_new in batch_x]
-                logits = model.query(all_raw, train_data.vocab, device)
-                losses = loss_func_keep_dim(logits, batch['y'].new_full((len(all_raw), 1), batch['y'][i][0]))
-                for x_new, loss in zip(all_raw, losses):
-                  bubble = (x_new, loss)
-                  for j in range(len(worst)):
-                    if worst[j][1] < bubble[1]:
-                      worst[j], bubble = bubble, worst[j]
-
-              for x_new, _ in worst:
-                raw_data.append((x_new, int(batch['y'][i][0])))
-
-            dataset = text_classification.TextClassificationDataset.from_raw_data(
-                raw_data, train_data.vocab, attack_surface=attack_surface, perturbation=OPTS.perturbation)
-            batch = next(iter(dataset.get_loader(len(raw_data))))
+          batch = exhaustive_aug(aug_deltas, batch, batch_size, train_data, model, device, attack_surface, loss_func_keep_dim)
 
         optimizer.zero_grad()
+        cur_cert_frac += 0.1
+        cur_cert_eps += 0.1
         if cur_cert_frac > 0.0:
           out = model.forward(batch, cert_eps=cur_cert_eps)
           logits = out.val
@@ -167,7 +173,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
     is_best = False
     if dev_data:
       dev_results = test(task_class, model, "Dev", dev_data, device, batch_size=batch_size,
-                         aug_dataset=aug_dev_data)
+                         aug_dataset=aug_dev_data, attack_surface=attack_surface)
       epoch['dev'] = dev_results
       all_epoch_stats['acc']['dev']['clean'].append(dev_results['clean_acc'])
       all_epoch_stats['acc']['dev']['cert'].append(dev_results['cert_acc'])
@@ -223,9 +229,10 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
 
 
 def test(task_class, model, name, dataset, device, show_certified=False, batch_size=1,
-         adversary=None, aug_dataset=None):
+         adversary=None, aug_dataset=None, attack_surface=None):
   model.eval()
   loss_func = task_class.LOSS_FUNC
+  loss_func_keep_dim = task_class.LOSS_FUNC_KEEP_DIM
   results = {
       'name': name,
       'num_total': 0,
@@ -236,9 +243,13 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
       'loss': 0.0
   }
   data = dataset.get_loader(32)
+  aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
   with torch.no_grad():
     for batch in tqdm(data):
       batch = data_util.dict_batch_to_device(batch, device)
+      if OPTS.aug_perturbation is not None and attack_surface is not None:
+        batch = exhaustive_aug(aug_deltas, batch, batch_size, dataset, model, device, attack_surface,
+                               loss_func_keep_dim)
       out = model.forward(batch, cert_eps=1.0)
       results['loss'] += loss_func(out.val, batch['y']).item()
       num_correct, num_cert_correct = task_class.num_correct(out, batch['y'])
@@ -300,6 +311,7 @@ def parse_args():
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
+  parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
   parser.add_argument('--perturbation', type=str, default=None)
   parser.add_argument('--aug-perturbation', type=str, default=None)
   # Training
