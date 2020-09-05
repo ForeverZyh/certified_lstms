@@ -36,7 +36,7 @@ def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_su
       worst = [(' '.join(words), -1e10) for _ in range(OPTS.eaugment_by)]
       for batch_x in text_classification.ExhaustiveAdversary.DelDupSubWord(*aug_deltas, words, dummy_choice,
                                                                            batch_size=batch_size):
-        all_raw = [' '.join(x_new) for x_new in batch_x]
+        all_raw = [' '.join(x_new) for x_new in batch_x if len(x_new) > 0]
         logits = model.query(all_raw, data.vocab, device)
         losses = loss_func_keep_dim(logits, batch['y'].new_full((len(all_raw), 1), batch['y'][i][0]))
         for x_new, loss in zip(all_raw, losses):
@@ -51,7 +51,7 @@ def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_su
     dataset = text_classification.TextClassificationDataset.from_raw_data(
       raw_data, data.vocab, attack_surface=attack_surface, perturbation=OPTS.perturbation)
 
-    return next(iter(dataset.get_loader(len(raw_data))))
+    return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(raw_data)))), device)
 
 
 def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
