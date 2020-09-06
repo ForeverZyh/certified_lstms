@@ -130,8 +130,6 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
           batch = exhaustive_aug(aug_deltas, batch, batch_size, train_data, model, device, attack_surface, loss_func_keep_dim)
 
         optimizer.zero_grad()
-        cur_cert_frac += 0.1
-        cur_cert_eps += 0.1
         if cur_cert_frac > 0.0:
           out = model.forward(batch, cert_eps=cur_cert_eps)
           logits = out.val
