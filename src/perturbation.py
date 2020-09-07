@@ -3,6 +3,8 @@ import copy
 from functools import partial
 
 UNK = "_UNK_"
+
+
 class Transformation(ABC):
     def __init__(self, s, t, ipt, delta):
         """
@@ -85,7 +87,11 @@ class Del(Transformation):
 
 
 class Perturbation:
+    Del_idx = 0
+    Ins_idx = 1
+    Sub_idx = 2
     def __init__(self, trans, ipt, vocab, attack_surface=None, stop_words=None):
+        self.deltas = Perturbation.str2deltas(trans)
         trans = eval(trans)
         self.ipt = [w for w in ipt if w in vocab]
         self.trans = []
@@ -121,10 +127,14 @@ class Perturbation:
                 for tran in self.trans:
                     if isinstance(tran, Del) and tran.phi(i // 2):
                         ret[i].add(UNK)  # add dummy word for Del
-            if self.has_ins and i % 2 == 1:
-                for tran in self.trans:
-                    if isinstance(tran, Ins) and tran.phi(i // 2):
-                        ret[i].add(self.ipt[i // 2])  # add word for Ins
+            # TODO: This is a workaround for Dup, i.e., duplicate a previous word. One can have a general Ins, or even
+            # TODO: conditional Ins, but that will be a completely different implementation.
+            # TODO: This workaround is efficient and specially designed for Dup. However, a more general implementation
+            # TODO: will suffer from heavily CPU/GPU switch, thus is much less efficient than the workaround.
+            # if self.has_ins and i % 2 == 1:
+            #     for tran in self.trans:
+            #         if isinstance(tran, Ins) and tran.phi(i // 2):
+            #             ret[i].add(self.ipt[i // 2])  # add word for Ins
 
         return [list(x) for x in ret if len(x) > 1 or (UNK not in x and len(x) == 1)]
 
@@ -196,6 +206,5 @@ def tests():
     a = Perturbation("[(Ins, 2), (Del, 2)]", sen)
     print(a.get_output_for_baseline())
     print(a.get_output_for_baseline_final_state())
-
 
 # tests()

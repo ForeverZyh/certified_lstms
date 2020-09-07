@@ -576,7 +576,7 @@ class LSTMDP(nn.Module):
                 ins_extend = None
                 sub_extend = None
                 # Del
-                if self.deltas[0] > 0:  # Sub, [here,:,:,:,:] (Del, Ins, Sub, B, d)
+                if self.deltas[0] > 0:  # Del, [here,:,:,:,:] (Del, Ins, Sub, B, d)
                     del_1 = compute_state(h[:-1, :, :, :, :].reshape(-1, d), c[:-1, :, :, :, :].reshape(-1, d)
                                           , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
                                           unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
@@ -595,7 +595,20 @@ class LSTMDP(nn.Module):
 
                 # Ins
                 if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub, B, d)
-                    raise NotImplementedError
+                    ins_extend = compute_state(h[:, 0, :, :, :].reshape(-1, d), c[:, 0, :, :, :].reshape(-1, d)
+                                               , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                               None)
+                    ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
+                    for j in range(1, self.deltas_p1[1]):
+                        ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), c[:, j, :, :, :].reshape(-1, d),
+                                                     x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
+                                                     None)
+                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d),
+                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
+                                                mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
+                        ins_t_extend = view(merge(ins_t_extend, ins_t_1), self.deltas[0] + 1, 1, self.deltas[2] + 1,
+                                            B, d)
+                        ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
 
                 if self.deltas[2] > 0:  # Sub, [:,:,here,:,:] (Del, Ins, Sub, B, d)
                     sub_1 = compute_state(h[:, :, :-1, :, :].reshape(-1, d), c[:, :, :-1, :, :].reshape(-1, d)

@@ -790,13 +790,11 @@ def load_datasets(device, opts):
                                               downsample_to=opts.downsample_to,
                                               downsample_shard=opts.downsample_shard,
                                               truncate_to=opts.truncate_to,
-                                              include_self=opts.model != "lstm-dp",
                                               perturbation=opts.perturbation)
         dev_data = data_class.from_raw_data(raw_data.dev_data, vocab, attack_surface,
                                             downsample_to=opts.downsample_to,
                                             downsample_shard=opts.downsample_shard,
                                             truncate_to=opts.truncate_to,
-                                            include_self=opts.model != "lstm-dp",
                                             perturbation=opts.perturbation)
         if opts.data_cache_dir:
             with open(os.path.join(opts.data_cache_dir, 'train_data.pkl'), 'wb') as outfile:
@@ -918,23 +916,19 @@ class TextClassificationDataset(data_util.ProcessedDataset):
 
     @classmethod
     def from_raw_data(cls, raw_data, vocab, attack_surface=None, truncate_to=None,
-                      downsample_to=None, downsample_shard=0, include_self=True, perturbation=None):
+                      downsample_to=None, downsample_shard=0, perturbation=None):
         if downsample_to:
             raw_data = raw_data[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
         examples = []
         for x, y in raw_data:
             all_words = [w.lower() for w in x.split()]
+            ins_delta = 0
             if perturbation is not None:
                 perturb = Perturbation(perturbation, all_words, vocab, attack_surface=attack_surface)
+                ins_delta = perturb.deltas[perturb.Ins_idx]
                 choices = perturb.get_output_for_baseline_final_state()
                 choices = [[x for x in choice if x == UNK or x in vocab] for choice in choices]
                 words = perturb.ipt
-                assert len(words) == len(choices)  # TODO: This does not hold when Ins is considered.
-                # TODO: remove w from choices, and be careful about the DiscreteChoice.val will be outside of the bound.
-                # if include_self:
-                #     choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
-                # else:
-                #     choices = swaps
             elif attack_surface is not None:
                 raise AttributeError
             else:
@@ -943,9 +937,10 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 words = words[:truncate_to]
             if len(words) == 0:
                 continue
-            word_idxs = [vocab.get_index(w) for w in words]
+            word_idxs = [vocab.get_index(w) for w in words] + [0] * ins_delta  # append dummy words
             x_torch = torch.tensor(word_idxs).view(1, -1, 1)  # (1, T, d)
             if perturbation is not None:
+                choices = choices + [[] for _ in range(ins_delta)]  # append dummy choices
                 unk_mask = torch.tensor([0 if UNK in c_list else 1 for c_list in choices],
                                         dtype=torch.long).unsqueeze(0)  # (1, T)
                 choices_word_idxs = [
@@ -965,6 +960,8 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 unk_mask = None
 
             mask_torch = torch.ones((1, len(word_idxs)))
+            for i in range(1, ins_delta + 1):
+                mask_torch[0][-i] = 0
             if unk_mask is None:
                 unk_mask = torch.ones((1, len(word_idxs)))
             x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
@@ -998,7 +995,7 @@ class TextClassificationDataset(data_util.ProcessedDataset):
             choice_mats.append(ex['x'].choice_mat)
             choice_masks.append(ex['x'].choice_mask)
             cur_len = ex['x'].shape[1]
-            masks[i, :cur_len] = 1
+            masks[i, :cur_len] = ex['x'].sequence_mask[0]
             unk_masks[i, :cur_len] = ex['x'].unk_mask[0] if ex['x'].unk_mask is not None else 1
             y[i, 0] = ex['y']
             lengths[i] = ex['lengths'][0]
