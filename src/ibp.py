@@ -601,6 +601,10 @@ class LSTMDP(nn.Module):
                                                None)
                     ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                     for j in range(1, self.deltas_p1[1]):
+                        if i < j * 2 - 1:
+                            ins_extend = tuple(
+                                [cat([s, t[:, :1, :, :, :]], dim=1) for s, t in zip(ins_extend, ins_extend)])
+                            continue
                         # if j Ins's have already been done, then we start with i - j
                         ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), c[:, j, :, :, :].reshape(-1, d),
                                                      x[:, i - j, :],
