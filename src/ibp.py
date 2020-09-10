@@ -570,6 +570,7 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
+            ans_extend = []
             for i in range(T):
                 # identity
                 del_extend = None
@@ -600,12 +601,24 @@ class LSTMDP(nn.Module):
                                                None)
                     ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                     for j in range(1, self.deltas_p1[1]):
+                        # if j Ins's have already been done, then we start with i - j
                         ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), c[:, j, :, :, :].reshape(-1, d),
-                                                     x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
-                                                     None)
-                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d),
-                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
-                                                mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
+                                                     x[:, i - j, :],
+                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
+
+                        # if j - 1 Ins's have already been done, we dup it
+                        def get_ans(ans, idx):
+                            if idx <= 0:
+                                return h, c
+                            else:
+                                return ans[idx][0], ans[idx][1]
+
+                        inp_pos_h, inp_pos_c = get_ans(ans_extend, i - j)
+                        ins_t_1 = compute_state(inp_pos_h[:, j - 1, :, :, :].reshape(-1, d),
+                                                inp_pos_c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j + 1, :],
+                                                mask[:, i - j + 1].unsqueeze(-1) if mask is not None else None, None)
+                        ins_t_1 = compute_state(ins_t_1[0], ins_t_1[1], x[:, i - j + 1, :],
+                                                mask[:, i - j + 1].unsqueeze(-1) if mask is not None else None, None)
                         ins_t_extend = view(merge(ins_t_extend, ins_t_1), self.deltas[0] + 1, 1, self.deltas[2] + 1,
                                             B, d)
                         ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
@@ -637,6 +650,7 @@ class LSTMDP(nn.Module):
 
                 assert extend is not None
                 h, c = extend[0], extend[1]
+                ans_extend.append((h, c))
                 # print((h.ub - h.lb).sum())
 
                 post_state = view(extend, -1, d)  # [-1, d]
