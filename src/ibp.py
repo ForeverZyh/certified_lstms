@@ -596,12 +596,14 @@ class LSTMDP(nn.Module):
 
                 # Ins
                 if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub, B, d)
+                    # origin input
                     ins_extend = compute_state(h[:, 0, :, :, :].reshape(-1, d), c[:, 0, :, :, :].reshape(-1, d)
                                                , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
                                                None)
                     ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                     for j in range(1, self.deltas_p1[1]):
                         if i < j * 2 - 1:
+                            # e.g., when i = 2 and j = 2, it is not possible to have 2 Ins before (including) i = 2
                             ins_extend = tuple(
                                 [cat([s, t[:, :1, :, :, :]], dim=1) for s, t in zip(ins_extend, ins_extend)])
                             continue
@@ -617,7 +619,9 @@ class LSTMDP(nn.Module):
                             else:
                                 return ans[idx][0], ans[idx][1]
 
-                        inp_pos_h, inp_pos_c = get_ans(ans_extend, i - j)
+                        # e.g., i = 3, j = 2, we would like to start with hidden state at 1
+                        # e.g., i = 6, j = 3, we would like to start with hidden state at 4
+                        inp_pos_h, inp_pos_c = get_ans(ans_extend, i - 2)
                         ins_t_1 = compute_state(inp_pos_h[:, j - 1, :, :, :].reshape(-1, d),
                                                 inp_pos_c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
                                                 mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
