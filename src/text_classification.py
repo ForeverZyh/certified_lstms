@@ -529,6 +529,7 @@ class ExhaustiveAdversary(Adversary):
             for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
+                assert orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
                                if p * (2 * y - 1) <= 0]
                 if len(cur_adv_exs) > 0:
