@@ -524,12 +524,18 @@ class ExhaustiveAdversary(Adversary):
 
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
-            choices = [cur_swaps for w, cur_swaps in zip(words, swaps)]
+            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if w in dataset.vocab]
+            words = [w for w in words if w in dataset.vocab]
 
             is_correct_single = True
-            for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices):
+            for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
+                if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
+                    print("Fail! ", preds.min(), preds.max())
+                    print("Min: ", all_raw[int(preds.min(dim=0)[1][0])])
+                    print("Max: ", all_raw[int(preds.max(dim=0)[1][0])])
+                    _ = input("Press any key to continue...")
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
                                if p * (2 * y - 1) <= 0]
                 if len(cur_adv_exs) > 0:
@@ -571,17 +577,15 @@ class ExhaustiveAdversary(Adversary):
                                     x2 = []
                                     copy_point = 0
                                     paste_point = 0
-                                    while copy_point < end_pos and paste_point < end_pos:
+                                    while copy_point < end_pos:
                                         if copy_point in dup_poss:
                                             x2.append(x3[copy_point])
                                             x2.append(x3[copy_point])
-                                            paste_point += 2
                                             copy_point += 1
                                         elif copy_point in del_poss:
                                             copy_point += 1
                                         else:
                                             x2.append(x3[copy_point])
-                                            paste_point += 1
                                             copy_point += 1
 
                                     X.append(x2)

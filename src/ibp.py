@@ -570,7 +570,6 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
-            ans_extend = []
             for i in range(T):
                 # identity
                 del_extend = None
@@ -597,10 +596,13 @@ class LSTMDP(nn.Module):
                                            unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
 
                     for j in range(1, self.deltas_p1[1]):
-                        del_extend_t = del_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
-                                                 mask[:, i - j].unsqueeze(-1) if mask is not None else None,
-                                                 unk_mask[:, i - j].unsqueeze(-1) if unk_mask is not None else None)
-                        del_extend = tuple([cat([s, t], dim=1) for s, t in zip(del_extend, del_extend_t)])
+                        if i >= j * 2:
+                            del_extend_t = del_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
+                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None,
+                                                     unk_mask[:, i - j].unsqueeze(-1) if unk_mask is not None else None)
+                            del_extend = tuple([cat([s, t], dim=1) for s, t in zip(del_extend, del_extend_t)])
+                        else:
+                            del_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in del_extend])
 
                 # Ins
                 if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub, B, d)
@@ -612,31 +614,22 @@ class LSTMDP(nn.Module):
                     for j in range(1, self.deltas_p1[1]):
                         if i < j * 2 - 1:
                             # e.g., when i = 2 and j = 2, it is not possible to have 2 Ins before (including) i = 2
-                            ins_extend = tuple(
-                                [cat([s, t[:, :1, :, :, :]], dim=1) for s, t in zip(ins_extend, ins_extend)])
+                            ins_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in ins_extend])
                             continue
-                        # if j Ins's have already been done, then we start with i - j
-                        ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), c[:, j, :, :, :].reshape(-1, d),
-                                                     x[:, i - j, :],
-                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
+                        if i < j * 2:   # if j Ins's have already been done, then we start with i - j
+                            ins_t_extend = None
+                        else:
+                            ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), 
+                                                         c[:, j, :, :, :].reshape(-1, d), x[:, i - j, :],
+                                                         mask[:, i - j].unsqueeze(-1) if mask is not None else None, 
+                                                         None)
 
                         # if j - 1 Ins's have already been done, we dup it
-                        def get_ans(ans, idx):
-                            if idx <= 0:
-                                return h, c
-                            else:
-                                return ans[idx][0], ans[idx][1]
-
-                        # e.g., i = 3, j = 2, we would like to start with hidden state at 1
-                        # e.g., i = 6, j = 3, we would like to start with hidden state at 4
-                        inp_pos_h, inp_pos_c = get_ans(ans_extend, i - 2)
-                        ins_t_1 = compute_state(inp_pos_h[:, j - 1, :, :, :].reshape(-1, d),
-                                                inp_pos_c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
+                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d), 
+                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
                                                 mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
-                        ins_t_1 = compute_state(ins_t_1[0], ins_t_1[1], x[:, i - j, :],
-                                                mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
-                        ins_t_extend = view(merge(ins_t_extend, ins_t_1), self.deltas[0] + 1, 1, self.deltas[2] + 1,
-                                            B, d)
+                        ins_t_extend = view(merge(ins_t_extend, ins_t_1) if ins_t_extend is not None else ins_t_1, 
+                                            self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                         ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
 
                 if self.deltas[2] > 0:  # Sub, [:,:,here,:,:] (Del, Ins, Sub, B, d)
@@ -658,10 +651,13 @@ class LSTMDP(nn.Module):
                                            mask[:, i].unsqueeze(-1) if mask is not None else None)
 
                     for j in range(1, self.deltas_p1[1]):
-                        sub_extend_t = sub_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
-                                                 output[:, i - j, :],
-                                                 mask[:, i - j].unsqueeze(-1) if mask is not None else None)
-                        sub_extend = tuple([cat([s, t], dim=1) for s, t in zip(sub_extend, sub_extend_t)])
+                        if i >= j * 2:
+                            sub_extend_t = sub_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
+                                                     output[:, i - j, :],
+                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None)
+                            sub_extend = tuple([cat([s, t], dim=1) for s, t in zip(sub_extend, sub_extend_t)])
+                        else:
+                            sub_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in sub_extend])
 
                 extends = [del_extend, ins_extend, sub_extend]
                 extend = None
@@ -673,7 +669,6 @@ class LSTMDP(nn.Module):
 
                 assert extend is not None
                 h, c = extend[0], extend[1]
-                ans_extend.append((h, c))
                 # print((h.ub - h.lb).sum())
 
                 post_state = view(extend, -1, d)  # [-1, d]
