@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 import tensorflow_datasets as tfds
+import dgl
 
 import attacks
 import data_util
@@ -1004,6 +1005,100 @@ class TextClassificationDataset(data_util.ProcessedDataset):
         choice_masks = data_util.multi_dim_padded_cat(choice_masks, 0).long()
         return {'x': ibp.DiscreteChoiceTensorWithUNK(x_vals, choice_mats, choice_masks, masks, unk_masks),
                 'y': y, 'mask': masks, 'lengths': lengths}
+
+
+class TextClassificationTreeDataset(data_util.ProcessedDataset):
+    """
+    Dataset that holds processed example dicts
+    """
+
+    @classmethod
+    def from_raw_data(cls, tree_data, vocab, attack_surface=None, downsample_to=None, downsample_shard=0,
+                      perturbation=None):
+        if downsample_to:
+            tree_data = tree_data[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
+        examples = []
+        tree_data_vocab = list(tree_data.vocab.keys())
+        for tree in tree_data:
+            all_ids = [int(x) for x in tree.ndata['x'] if int(x) != tree_data.PAD_WORD]
+            all_words = [tree_data_vocab[x] for x in all_ids]
+            all_i_words = [i for i, x in enumerate(tree.ndata['x']) if int(x) != tree_data.PAD_WORD]
+            choices = [[] for _ in tree.ndata['x']]
+            words = [None] * len(tree.ndata['x'])
+            if perturbation is not None:
+                perturb = Perturbation(perturbation, all_words, tree_data.vocab, attack_surface=attack_surface)
+                choices_ = perturb.get_output_for_baseline_final_state()
+                for i, choice, w in zip(all_i_words, choices_, all_words):
+                    words[i] = w
+                    choices[i] = [x for x in choice if x == UNK or x in vocab]
+
+            elif attack_surface is not None:
+                raise AttributeError
+            else:
+                for i, w in zip(all_i_words, all_words):
+                    words[i] = w
+            if len(words) == 0:
+                continue
+            word_idxs = [vocab.get_index(w) for w in words]  # w must be in the vocab
+            x_torch = torch.tensor(word_idxs).view(-1, 1)  # (T, d)
+            if perturbation is not None:
+                unk_mask = torch.tensor([0 if UNK in c_list else 1 for c_list in choices],
+                                        dtype=torch.long)  # (T)
+                choices_word_idxs = [
+                    torch.tensor([vocab.get_index(c) for c in c_list if c != UNK], dtype=torch.long) for c_list in
+                    choices
+                ]
+                # if any(0 in c.view(-1).tolist() for c in choices_word_idxs):
+                #     raise ValueError("UNK tokens found")
+                choices_torch = pad_sequence(choices_word_idxs, batch_first=True).unsqueeze(2)  # (T, C, 1)
+                choices_mask = (choices_torch.squeeze(-1) != 0).long()  # (T, C)
+            elif attack_surface is not None:
+                raise AttributeError
+            else:
+                choices_torch = x_torch.view(-1, 1, 1)  # (T, 1, 1)
+                choices_mask = torch.ones_like(x_torch.view(-1, 1))
+                unk_mask = None
+
+            mask_torch = torch.Tensor([1 if x is not None else 0 for x in words])
+            if unk_mask is None:
+                unk_mask = torch.ones(len(word_idxs))
+            x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
+            examples.append(dict(x=x_bounded, mask=mask_torch, trees=[tree]))
+        return cls(tree_data, vocab, examples)
+
+    @staticmethod
+    def example_len(example):
+        return example['x'].shape[1]
+
+    @staticmethod
+    def collate_examples(examples):
+        """
+        Turns a list of examples into a workable batch:
+        """
+        x_vals = []
+        choice_mats = []
+        choice_masks = []
+        trees = []
+        masks = []
+        unk_masks = []
+        for i, ex in enumerate(examples):
+            x_vals.append(ex['x'].val)
+            # (T, C, 1)
+            choice_mats.append(ex['x'].choice_mat)
+            # (T, C)
+            choice_masks.append(ex['x'].choice_mask)
+            cur_len = ex['x'].shape[0]
+            masks.append(ex['x'].sequence_mask)
+            unk_masks.append(ex['x'].unk_mask if ex['x'].unk_mask is not None else torch.ones(cur_len))
+            trees.extend(ex['trees'])
+        trees = dgl.batch(trees)
+        x_vals = torch.cat(x_vals, 0)
+        masks = torch.cat(masks, 0)
+        unk_masks = torch.cat(unk_masks, 0)
+        choice_mats = data_util.multi_dim_padded_cat(choice_mats, 0).long()
+        choice_masks = data_util.multi_dim_padded_cat(choice_masks, 0).long()
+        return {'x': ibp.DiscreteChoiceTensorWithUNK(x_vals, choice_mats, choice_masks, masks, unk_masks),
+                'trees': trees, 'mask': masks, 'y': trees.ndata['y']}
 
 
 class ToyClassificationDataset(TextClassificationDataset):

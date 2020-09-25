@@ -44,6 +44,29 @@ class Vocabulary(object):
         word_mat = word_mat / word_mat.norm(dim=-1, keepdim=True)
     return vocab, word_mat
 
+  @classmethod
+  def read_word_vecs_tree_lstm(cls, pre_vocab, glove_dir, glove_name, device, normalize=False):
+    vocab = cls(prepend_null=False)
+    glove_config = GLOVE_CONFIGS[glove_name]
+    vecs = [np.zeros(glove_config['size']) for _ in range(len(pre_vocab) + 1)]
+    found = 0
+    fn = os.path.join(glove_dir, 'glove.%s.txt' % glove_name)
+    print('Reading GloVe vectors from %s...' % fn)
+    for word in pre_vocab:
+      vocab.add_word_hard(word)
+    with open(fn) as f:
+      for i, line in tqdm(enumerate(f), total=glove_config['lines']):
+        toks = line.strip().split(' ')
+        word = toks[0]
+        if word in pre_vocab:
+          found += 1
+          vecs[pre_vocab[word]] = np.array([float(x) for x in toks[1:]])
+    print('Found %d/%d words in %s' % (found, len(pre_vocab), fn))
+    word_mat = torch.tensor(vecs, dtype=torch.float, device=device)
+    if normalize:
+      word_mat = word_mat / word_mat.norm(dim=-1, keepdim=True)
+    return vocab, word_mat
+
   def __init__(self, unk_threshold=0, prepend_null=False):
     """Initialize the vocabulary.
 
