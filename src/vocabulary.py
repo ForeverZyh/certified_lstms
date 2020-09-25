@@ -26,7 +26,7 @@ class Vocabulary(object):
     glove_config = GLOVE_CONFIGS[glove_name]
     vecs = [np.zeros(glove_config['size'])]  # UNK embedding, won't be used
     if prepend_null:
-        vecs.append(np.zeros((300)))  # NULL embedding
+        vecs.append(np.zeros(glove_config['size']))  # NULL embedding
     found = 0
     fn = os.path.join(glove_dir, 'glove.%s.txt' % glove_name)
     print('Reading GloVe vectors from %s...' % fn)
