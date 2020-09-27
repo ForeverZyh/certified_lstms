@@ -171,9 +171,9 @@ class TreeLSTMCellDP(nn.Module):
             return h_cat, c
 
         # (n, Del, Ins, Sub, 2 * d)
-        new_h_cat = ibp.IntervalBoundedTensor.bottom([h.shape[0]] + self.deltas_p1 + [2 * self.h_size], self.device)
+        new_h_cat = []
         # (n, Del, Ins, Sub, d)
-        new_c = ibp.IntervalBoundedTensor.bottom([h.shape[0]] + self.deltas_p1 + [self.h_size], self.device)
+        new_c = []
         for deltas in itertools.product(*self.deltas_p1_ranges):
             deltas_ranges = [range(x + 1) for x in deltas]
             piece = None
@@ -184,9 +184,8 @@ class TreeLSTMCellDP(nn.Module):
                                   c[:, 0, deltas_left[0], deltas_left[1], deltas_left[2], :],
                                   c[:, 1, deltas_right[0], deltas_right[1], deltas_right[2], :])
                 piece = ibp.merge(piece, tmp)
-            new_h_cat[:, deltas[0], deltas[1], deltas[2], :] = new_h_cat[:, deltas[0], deltas[1], deltas[2], :].merge(
-                piece[0])
-            new_c[:, deltas[0], deltas[1], deltas[2], :] = new_c[:, deltas[0], deltas[1], deltas[2], :].merge(piece[1])
+            new_h_cat.append(piece[0].unsqueeze(1))
+            new_c.append(piece[1].unsqueeze(1))
 
             predicate = (unk_mask > 0) & (unk_mask <= deltas[0])
             if predicate.sum() > 0:
@@ -199,6 +198,9 @@ class TreeLSTMCellDP(nn.Module):
                                     aux[i, deltas[0], deltas[1], deltas[2], :].merge(
                                         x[i, 1 - j, deltas[0] - int(unk_mask[i, j]), deltas[1], deltas[2], :])
 
+        new_h_cat = ibp.cat(new_h_cat, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2],
+                                                  self.h_size * 2)
+        new_c = ibp.cat(new_c, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size)
         ret = {}
         add(ret, "iou", self.U_iou(new_h_cat))
         add(ret, "c", new_c)
