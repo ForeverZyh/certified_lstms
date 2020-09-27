@@ -50,16 +50,21 @@ class IntervalBoundedTensor(BoundedTensor):
             # Note that there may be small violations on the order of 1e-5,
             # due to floating point rounding/non-associativity issues.
             # e.g. https://github.com/pytorch/pytorch/issues/9146
-            max_lb_violation = torch.max(lb - val)
+            max_lb_violation = torch.max((lb - val) * (lb <= ub).float())  # exclude bottom
             if max_lb_violation > TOLERANCE:
                 print('WARNING: Lower bound wrong (max error = %g)' % max_lb_violation.item(), file=sys.stderr)
-            max_ub_violation = torch.max(val - ub)
+            max_ub_violation = torch.max((val - ub) * (lb <= ub).float()) # exclude bottom
             if max_ub_violation > TOLERANCE:
                 print('WARNING: Upper bound wrong (max error = %g)' % max_ub_violation.item(), file=sys.stderr)
 
     @staticmethod
-    def bottom(x):
+    def bottom_like(x):
         return IntervalBoundedTensor(torch.zeros_like(x), torch.ones_like(x) * 1e16, torch.ones_like(x) * (-1e16))
+
+    @staticmethod
+    def bottom(x, device):
+        return IntervalBoundedTensor(torch.zeros(x, device=device), torch.ones(x, device=device) * 1e16,
+                                     torch.ones(x, device=device) * (-1e16))
 
     ### Reimplementations of torch.Tensor methods
     def __neg__(self):
@@ -616,19 +621,19 @@ class LSTMDP(nn.Module):
                             # e.g., when i = 2 and j = 2, it is not possible to have 2 Ins before (including) i = 2
                             ins_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in ins_extend])
                             continue
-                        if i < j * 2:   # if j Ins's have already been done, then we start with i - j
+                        if i < j * 2:  # if j Ins's have already been done, then we start with i - j
                             ins_t_extend = None
                         else:
-                            ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d), 
+                            ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d),
                                                          c[:, j, :, :, :].reshape(-1, d), x[:, i - j, :],
-                                                         mask[:, i - j].unsqueeze(-1) if mask is not None else None, 
+                                                         mask[:, i - j].unsqueeze(-1) if mask is not None else None,
                                                          None)
 
                         # if j - 1 Ins's have already been done, we dup it
-                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d), 
+                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d),
                                                 c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
                                                 mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
-                        ins_t_extend = view(merge(ins_t_extend, ins_t_1) if ins_t_extend is not None else ins_t_1, 
+                        ins_t_extend = view(merge(ins_t_extend, ins_t_1) if ins_t_extend is not None else ins_t_1,
                                             self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                         ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
 
@@ -1133,7 +1138,11 @@ def log_softmax(x, dim):
         raise TypeError(x)
 
 
-def merge(X1: tuple, X2: tuple):
+def merge(X1, X2):
+    if X1 is None:
+        return X2
+    if X2 is None:
+        return X1
     ret = ()
     for (x1, x2) in zip(X1, X2):
         ret += (x1.merge(x2),)

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import dgl
 from dgl.data.tree import SSTDataset
 
-from tree_lstm import TreeLSTM
+from tree_lstm import TreeLSTM, TreeLSTMDP
 from text_classification import TextClassificationTreeDataset
 import vocabulary
 import data_util
@@ -38,26 +38,28 @@ def main(args):
     vocab, word_mat = vocabulary.Vocabulary.read_word_vecs_tree_lstm(trainset.vocab, args.glove_dir, "6B.50d", device)
     attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(args.pddb_file, args.use_fewer_sub)
     trainset = TextClassificationTreeDataset.from_raw_data(trainset, vocab, attack_surface=attack_surface,
-                                                           perturbation="[(Del,1),(Sub,1),(Ins,1)]")
+                                                           perturbation=args.perturbation)
     train_loader = trainset.get_loader(args.batch_size)
 
     devset = SSTDataset(mode='dev')
     devset = TextClassificationTreeDataset.from_raw_data(devset, vocab, attack_surface=attack_surface,
-                                                         perturbation="[(Del,1),(Sub,1),(Ins,1)]")
+                                                         perturbation=args.perturbation)
     dev_loader = devset.get_loader(args.batch_size)
 
     testset = SSTDataset(mode='test')
     testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, attack_surface=attack_surface,
-                                                          perturbation="[(Del,1),(Sub,1),(Ins,1)]")
+                                                          perturbation=args.perturbation)
     test_loader = testset.get_loader(args.batch_size)
 
-    model = TreeLSTM(len(trainset.vocab),
-                     word_mat.shape[1],
-                     args.h_size,
-                     num_classes,
-                     args.dropout,
-                     cell_type='childsum' if args.child_sum else 'nary',
-                     pretrained_emb=word_mat).to(device)
+    model = TreeLSTMDP(device,
+                       len(trainset.vocab),
+                       word_mat.shape[1],
+                       args.h_size,
+                       num_classes,
+                       args.dropout,
+                       cell_type='childsum' if args.child_sum else 'nary',
+                       pretrained_emb=word_mat, perturbation=args.perturbation,
+                       no_wordvec_layer=args.no_wordvec_layer).to(device)
     print(model)
     params_ex_emb = [x for x in list(model.parameters()) if x.requires_grad and x.size(0) != len(trainset.vocab)]
     params_emb = list(model.embedding.parameters())
@@ -184,6 +186,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.05)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--dropout', type=float, default=0.5)
+    parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
 
     # Adversary
     parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
