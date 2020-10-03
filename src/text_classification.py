@@ -16,6 +16,7 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 import tensorflow_datasets as tfds
 import dgl
+import networkx as nx
 
 import attacks
 import data_util
@@ -524,7 +525,8 @@ class ExhaustiveAdversary(Adversary):
 
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
-            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if w in dataset.vocab]
+            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if
+                       w in dataset.vocab]
             words = [w for w in words if w in dataset.vocab]
 
             is_correct_single = True
@@ -576,7 +578,6 @@ class ExhaustiveAdversary(Adversary):
                                 for del_poss in itertools.combinations(tuple(valid_del_poss), delete):
                                     x2 = []
                                     copy_point = 0
-                                    paste_point = 0
                                     while copy_point < end_pos:
                                         if copy_point in dup_poss:
                                             x2.append(x3[copy_point])
@@ -589,6 +590,117 @@ class ExhaustiveAdversary(Adversary):
                                             copy_point += 1
 
                                     X.append(x2)
+                                    if len(X) == batch_size:
+                                        yield X
+                                        X = []
+
+        if len(X) > 0:
+            yield X
+
+    @staticmethod
+    def cons_tree(x, phi, f, old_tree, vocab):
+        PAD_WORD = -1
+        g = nx.DiGraph()
+        old_xid = old_tree.ndata['x'].tolist()
+        cnt = 0
+        map_old_xid_x_id = [None] * len(old_xid)
+        for i, id in enumerate(old_xid):
+            if id != PAD_WORD:  # PAD_WORD
+                map_old_xid_x_id[i] = cnt
+                cnt += 1
+
+        assert cnt == len(x)  # sanity check
+
+        def _rec_build(old_u):
+            in_nodes = old_tree.in_edges(old_u)[0]
+            sub_trees = []
+            for node in in_nodes:
+                node = int(node)
+                if old_tree.in_degrees(node) == 0:
+                    # leaf node
+                    cid = g.number_of_nodes()
+                    id = map_old_xid_x_id[node]
+                    if phi[id] == 0:
+                        word = vocab.get(x[id], PAD_WORD)
+                    elif phi[id] == 1:
+                        continue
+                    elif phi[id] == 2:
+                        left = cid + 1
+                        right = cid + 2
+                        word = vocab.get(x[id], PAD_WORD)
+                        g.add_node(cid, x=PAD_WORD, y=0, mask=0)  # we do not care about the y label
+                        g.add_node(left, x=word, y=0, mask=1)  # we do not care about the y label
+                        g.add_node(right, x=word, y=0, mask=1)  # we do not care about the y label
+                        g.add_edge(left, cid)
+                        g.add_edge(right, cid)
+                        sub_trees.append(cid)
+                        continue
+                    elif phi[id] == 3:
+                        word = vocab.get(f[id], PAD_WORD)
+                    else:
+                        raise NotImplementedError
+
+                    g.add_node(cid, x=word, y=0, mask=1)  # we do not care about the y label
+                    sub_trees.append(cid)
+                else:
+                    sub_tree = _rec_build(node)
+                    if sub_tree is not None:
+                        sub_trees.append(sub_tree)
+
+            if len(sub_trees) == 0:
+                return None
+            elif len(sub_trees) == 1:
+                return sub_trees[0]
+            else:
+                assert len(sub_trees) == 2  # sanity check
+                nid = g.number_of_nodes()
+                g.add_node(nid, x=PAD_WORD, y=0, mask=0)  # we do not care about the y label
+                for cid in sub_trees:
+                    g.add_edge(cid, nid)
+                return nid
+
+        # add root
+        root = _rec_build(0)
+        g.add_node(root, x=PAD_WORD, y=int(old_tree.ndata['y'][0]), mask=0)
+        assert old_tree.out_degrees(0) == 0  # sanity check
+        return dgl.from_networkx(g, node_attrs=['x', 'y', 'mask'])
+
+    @staticmethod
+    def DelDupSubTree(a, b, c, x, tree, vocab, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
+        end_pos = len(x)
+
+        valid_sub_poss = [i for i in range(end_pos) if len(choices[i]) > 0]
+        X = []
+        # list of trees that are constructed by (word_id, phi, f)
+        # word_id is in x
+        # phi [1 -> Del, 2 -> Dup, 3 -> Sub]
+        # f [None or syn]
+        for sub in range(c, -1, -1):
+            for sub_poss in itertools.combinations(tuple(valid_sub_poss), sub):
+                sub_pos_strs = []
+                for sub_pos in sub_poss:
+                    sub_pos_strs.append(choices[sub_pos])
+                for sub_pos_str in itertools.product(*sub_pos_strs):
+                    f = [None] * len(x)
+                    for i, sub_pos in enumerate(sub_poss):
+                        f[sub_pos] = sub_pos_str[i]
+                    valid_dup_poss = [i for i in range(end_pos) if i not in sub_poss]
+                    for dup in range(b, -1, -1):
+                        for dup_poss in itertools.combinations(tuple(valid_dup_poss), dup):
+                            valid_del_poss = [i for i in range(end_pos) if
+                                              (i not in dup_poss) and (i not in sub_poss) and x[i] in del_set]
+
+                            for delete in range(a, -1, -1):
+                                for del_poss in itertools.combinations(tuple(valid_del_poss), delete):
+                                    phi = [0] * len(x)
+                                    for sub_pos in sub_poss:
+                                        phi[sub_pos] = 3
+                                    for dup_pos in dup_poss:
+                                        phi[dup_pos] = 2
+                                    for del_pos in del_poss:
+                                        phi[del_pos] = 1
+
+                                    X.append(ExhaustiveAdversary.cons_tree(x, phi, f, tree, vocab))
                                     if len(X) == batch_size:
                                         yield X
                                         X = []
@@ -1017,20 +1129,22 @@ class TextClassificationTreeDataset(data_util.ProcessedDataset):
     """
 
     @classmethod
-    def from_raw_data(cls, tree_data, vocab, attack_surface=None, downsample_to=None, downsample_shard=0,
-                      perturbation=None):
+    def from_raw_data(cls, trees, vocab, tree_data_vocab=None, PAD_WORD=None, attack_surface=None, downsample_to=None,
+                      downsample_shard=0, perturbation=None):
+        assert tree_data_vocab is not None
+        assert PAD_WORD is not None
         if downsample_to:
-            tree_data = tree_data[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
+            trees = trees[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
         examples = []
-        tree_data_vocab = list(tree_data.vocab.keys())
-        for tree in tree_data:
-            all_ids = [int(x) for x in tree.ndata['x'] if int(x) != tree_data.PAD_WORD]
-            all_words = [tree_data_vocab[x] for x in all_ids]
-            all_i_words = [i for i, x in enumerate(tree.ndata['x']) if int(x) != tree_data.PAD_WORD]
+        tree_data_vocab_key_list = list(tree_data_vocab.keys())
+        for tree in trees:
+            all_ids = [int(x) for x in tree.ndata['x'] if int(x) != PAD_WORD]
+            all_words = [tree_data_vocab_key_list[x] for x in all_ids]
+            all_i_words = [i for i, x in enumerate(tree.ndata['x']) if int(x) != PAD_WORD]
             choices = [[] for _ in tree.ndata['x']]
             words = [None] * len(tree.ndata['x'])
             if perturbation is not None:
-                perturb = Perturbation(perturbation, all_words, tree_data.vocab, attack_surface=attack_surface)
+                perturb = Perturbation(perturbation, all_words, tree_data_vocab, attack_surface=attack_surface)
                 choices_ = perturb.get_output_for_baseline_final_state()
                 for i, choice, w in zip(all_i_words, choices_, all_words):
                     words[i] = w
@@ -1067,12 +1181,8 @@ class TextClassificationTreeDataset(data_util.ProcessedDataset):
             if unk_mask is None:
                 unk_mask = torch.ones(len(word_idxs))
             x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
-            examples.append(dict(x=x_bounded, mask=mask_torch, trees=[tree]))
-        return cls(tree_data, vocab, examples)
-
-    @staticmethod
-    def example_len(example):
-        return example['x'].shape[1]
+            examples.append(dict(x=x_bounded, mask=mask_torch, trees=[tree], rawx=all_words))
+        return cls(trees, vocab, examples)
 
     @staticmethod
     def collate_examples(examples):

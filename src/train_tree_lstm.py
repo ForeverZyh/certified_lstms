@@ -7,18 +7,28 @@ import torch.nn.functional as F
 import torch.nn.init as INIT
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import networkx as nx
+import matplotlib.pyplot as plt
 
 import dgl
 from dgl.data.tree import SSTDataset
 
 from tree_lstm import TreeLSTM, TreeLSTMDP
-from text_classification import TextClassificationTreeDataset
+from text_classification import TextClassificationTreeDataset, ExhaustiveAdversary
 import vocabulary
 import data_util
 import attacks
 
 SSTBatch = collections.namedtuple('SSTBatch', ['graph', 'mask', 'wordid', 'label'])
 num_classes = 5
+
+
+def plot_tree(g):
+    # this plot requires pygraphviz package
+    pos = nx.nx_agraph.graphviz_layout(g, prog='dot')
+    nx.draw(g, pos, with_labels=False, node_size=10,
+            node_color=[[.5, .5, .5]], arrowsize=4)
+    plt.show()
 
 
 def main(args):
@@ -35,19 +45,26 @@ def main(args):
         th.cuda.set_device(args.gpu)
 
     trainset = SSTDataset(mode='tiny')
+    trainset_vocab = trainset.vocab
     vocab, word_mat = vocabulary.Vocabulary.read_word_vecs_tree_lstm(trainset.vocab, args.glove_dir, "6B.50d", device)
     attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(args.pddb_file, args.use_fewer_sub)
-    trainset = TextClassificationTreeDataset.from_raw_data(trainset, vocab, attack_surface=attack_surface,
+    trainset = TextClassificationTreeDataset.from_raw_data(trainset, vocab, tree_data_vocab=trainset.vocab,
+                                                           PAD_WORD=trainset.PAD_WORD,
+                                                           attack_surface=attack_surface,
                                                            perturbation=args.perturbation)
     train_loader = trainset.get_loader(args.batch_size)
 
     devset = SSTDataset(mode='dev')
-    devset = TextClassificationTreeDataset.from_raw_data(devset, vocab, attack_surface=attack_surface,
+    devset = TextClassificationTreeDataset.from_raw_data(devset, vocab, tree_data_vocab=trainset.vocab,
+                                                         PAD_WORD=trainset.PAD_WORD,
+                                                         attack_surface=attack_surface,
                                                          perturbation=args.perturbation)
     dev_loader = devset.get_loader(args.batch_size)
 
     testset = SSTDataset(mode='test')
-    testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, attack_surface=attack_surface,
+    testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, tree_data_vocab=trainset.vocab,
+                                                          PAD_WORD=trainset.PAD_WORD,
+                                                          attack_surface=attack_surface,
                                                           perturbation=args.perturbation)
     test_loader = testset.get_loader(args.batch_size)
 
