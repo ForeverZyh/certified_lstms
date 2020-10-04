@@ -3,9 +3,11 @@ import argparse
 from stanza.server import CoreNLPClient
 from dgl.data.tree import SSTDataset
 import torch as th
-import nltk
 from zss import simple_distance, Node
 import numpy as np
+import xlwt
+import dgl
+import networkx as nx
 
 from text_classification import TextClassificationTreeDataset, ExhaustiveAdversary
 import vocabulary
@@ -35,6 +37,34 @@ def dgl_tree_to_zzs_tree(tree, vocab_key_list, u):
         in_node = int(in_node)
         node.addkid(dgl_tree_to_zzs_tree(tree, vocab_key_list, in_node))
     return node
+
+
+def parsed_tree_to_dgl_tree(parsed_tree, vocab):
+    PAD_WORD = -1
+    g = nx.DiGraph()
+
+    def _rec_build(u):
+        if len(u.child) == 1:
+            return _rec_build(u.child[0])
+        elif len(u.child) > 1:
+            assert len(u.child) == 2
+            nid = g.number_of_nodes()
+            g.add_node(nid, x=PAD_WORD, y=0)
+            left = _rec_build(u.child[0])
+            right = _rec_build(u.child[1])
+            g.add_edge(left, nid)
+            g.add_edge(right, nid)
+            return nid
+        else:
+            cid = g.number_of_nodes()
+            word = vocab.get(u.value, PAD_WORD)
+            g.add_node(cid, x=word, y=0)
+            return cid
+
+    # add root
+    root = _rec_build(parsed_tree)
+    g.add_node(root, x=PAD_WORD)
+    return dgl.from_networkx(g, node_attrs=['x', 'y'])
 
 
 def main(args):
@@ -81,7 +111,8 @@ def main(args):
     # print(trainset.examples[0]["rawx"])
     properties = {
         'tokenize.whitespace': True,
-        "parse.binaryTrees": True
+        "parse.binaryTrees": True,
+        "ssplit.eolonly": True
     }
     with CoreNLPClient(
             annotators=['tokenize', 'ssplit', 'pos', 'lemma', 'ner', 'parse'],
@@ -89,7 +120,7 @@ def main(args):
             memory='16G', properties=properties) as client:
 
         def get_similarity(text, g):
-            ann = client.annotate(" ".join(text))
+            ann = client.annotate(" ".join(text + ["\n"]))
             # get the first sentence
             sentence = ann.sentence[0]
 
@@ -99,35 +130,58 @@ def main(args):
             dgl_tree = dgl_tree_to_zzs_tree(g, list(trainset_vocab.keys()),
                                             [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0][0])
             # print(parsed_tree, dgl_tree)
-            return simple_distance(parsed_tree, dgl_tree)
+            return simple_distance(parsed_tree, dgl_tree), constituency_parse
 
-        deltas = [1, 0, 0]
-        baseline_sims = []
-        delta_sims = []
-        for example in trainset.examples[:100]:
-            text = example["rawx"]
-            tree = example["trees"][0]
-            baseline_dist = get_similarity(text, tree)
-            baseline_sims.append(baseline_dist)
+        workbook = xlwt.Workbook(encoding='utf-8')
 
-            swaps = attack_surface.get_swaps(text)
-            choices = [[s for s in cur_swaps if s in trainset_vocab] for w, cur_swaps in zip(text, swaps) if
-                       w in trainset_vocab]
+        for sheet_name, deltas in zip(["Del", "Ins", "Sub"], [[1, 0, 0], [0, 1, 0], [0, 0, 1]]):
+            # id, perturbed id (0 for baseline), dist
+            worksheet = workbook.add_sheet(sheet_name)
+            worksheet.write(0, 0, label="id")
+            worksheet.write(0, 1, label="perturbed id")
+            worksheet.write(0, 2, label="dist")
+            cnt = 1
+            for (id, example) in enumerate(trainset.examples[:100]):
+                text = example["rawx"]
+                tree = example["trees"][0]
+                baseline_dist, parsed_tree = get_similarity(text, tree)
+                worksheet.write(cnt, 0, label=id)
+                worksheet.write(cnt, 1, label=0)
+                worksheet.write(cnt, 2, label=baseline_dist)
+                cnt += 1
 
-            similarities = []
-            for (perturbed_text, perturbed_tree) in zip(ExhaustiveAdversary.DelDupSubWord(*deltas, text, choices,
-                                                                                          batch_size=1),
-                                                        ExhaustiveAdversary.DelDupSubTree(*deltas, text, tree,
-                                                                                          trainset_vocab, choices,
-                                                                                          batch_size=1)):
-                similarities.append(get_similarity(perturbed_text[0], perturbed_tree[0]))
+                swaps = attack_surface.get_swaps(text)
+                choices = [[s for s in cur_swaps if s in trainset_vocab] for w, cur_swaps in zip(text, swaps) if
+                           w in trainset_vocab]
 
-            mean_sim = float(np.mean(similarities))
-            delta_sims.append(mean_sim - baseline_dist)
-            print("baseline distance: %d\t average perturbed distance: %.2f" % (baseline_dist, mean_sim))
+                similarities = []
+                # for (perturbed_text, perturbed_tree) in zip(ExhaustiveAdversary.DelDupSubWord(*deltas, text, choices,
+                #                                                                               batch_size=1),
+                #                                             ExhaustiveAdversary.DelDupSubTree(*deltas, text, tree,
+                #                                                                               trainset_vocab, choices,
+                #                                                                               batch_size=1)):
+                for (perturbed_text, perturbed_tree) in zip(ExhaustiveAdversary.DelDupSubWord(*deltas, text, choices,
+                                                                                              batch_size=1),
+                                                            ExhaustiveAdversary.DelDupSubTree(*deltas, text,
+                                                                                              parsed_tree_to_dgl_tree(
+                                                                                                  parsed_tree,
+                                                                                                  trainset_vocab),
+                                                                                              trainset_vocab, choices,
+                                                                                              batch_size=1)):
+                    similarities.append(get_similarity(perturbed_text[0], perturbed_tree[0])[0])
 
-        np.save(str(deltas) + "baseline_sims", np.array(baseline_sims))
-        np.save(str(deltas) + "delta_sims", np.array(delta_sims))
+                mean_sim = float(np.mean(similarities))
+                # assert baseline_dist == similarities[-1]  # sanity check
+                assert 0 == similarities[-1]  # sanity check
+                for (i, sim) in enumerate(similarities[:-1]):  # the last one is the baseline
+                    worksheet.write(cnt, 0, label=id)
+                    worksheet.write(cnt, 1, label=i + 1)
+                    worksheet.write(cnt, 2, label=sim)
+                    cnt += 1
+
+                print("baseline distance: %d\t average perturbed distance: %.2f" % (baseline_dist, mean_sim))
+
+        workbook.save('sim_parsed.xls')
 
 
 if __name__ == '__main__':
