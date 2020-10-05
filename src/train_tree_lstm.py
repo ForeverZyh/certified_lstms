@@ -9,6 +9,7 @@ import glob
 from tqdm import tqdm
 import numpy as np
 import torch as th
+
 th.autograd.set_detect_anomaly(True)
 import torch.nn.functional as F
 import torch.nn.init as INIT
@@ -16,7 +17,6 @@ import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader
 import networkx as nx
-import matplotlib.pyplot as plt
 import dgl
 from dgl.data.tree import SSTDataset
 
@@ -28,14 +28,6 @@ import attacks
 
 SSTBatch = collections.namedtuple('SSTBatch', ['graph', 'mask', 'wordid', 'label'])
 num_classes = 5
-
-
-def plot_tree(g):
-    # this plot requires pygraphviz package
-    pos = nx.nx_agraph.graphviz_layout(g, prog='dot')
-    nx.draw(g, pos, with_labels=False, node_size=10,
-            node_color=[[.5, .5, .5]], arrowsize=4)
-    plt.show()
 
 
 def test(model, data, device, name):
