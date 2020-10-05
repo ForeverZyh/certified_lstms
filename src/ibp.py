@@ -92,10 +92,10 @@ class IntervalBoundedTensor(BoundedTensor):
 
     def merge(self, x2):
         if isinstance(x2, IntervalBoundedTensor):
-            val = torch.where((self.lb < x2.lb) | (self.ub > x2.ub), self.val, x2.val)
+            val = torch.where(self.lb <= self.ub, self.val, x2.val)
             return IntervalBoundedTensor(val, torch.min(self.lb, x2.lb), torch.max(self.ub, x2.ub))
         else:
-            val = torch.where((self.lb < x2) | (self.ub > x2), self.val, x2)
+            val = torch.where(self.lb <= self.ub, self.val, x2)
             return IntervalBoundedTensor(val, torch.min(self.lb, x2), torch.max(self.ub, x2))
 
     def clone(self):
