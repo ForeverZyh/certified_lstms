@@ -157,8 +157,6 @@ class TreeLSTMCellDP(nn.Module):
     def reduce_func_dp(self, nodes):
         h = get(nodes.mailbox, "h")  # (n, 2, Del, Ins, Sub, d)
         c = get(nodes.mailbox, "c")
-        auxh = ibp.IntervalBoundedTensor.bottom_like(h.val[:, 0, :, :, :, :])
-        auxc = ibp.IntervalBoundedTensor.bottom_like(h.val[:, 0, :, :, :, :])
         unk_mask = nodes.mailbox["unk_mask"]  # (n, 2)
         # if both children can be deleted, then the parent can be deleted
         new_unk_mask = th.where((unk_mask[:, 0] > 0) & (unk_mask[:, 1] > 0), th.sum(unk_mask, 1),
@@ -187,19 +185,36 @@ class TreeLSTMCellDP(nn.Module):
             new_h_cat.append(piece[0].unsqueeze(1))
             new_c.append(piece[1].unsqueeze(1))
 
-            predicate = (unk_mask > 0) & (unk_mask <= deltas[0])
-            if predicate.sum() > 0:
-                for i in range(predicate.shape[0]):
-                    for j in range(2):
-                        if 0 < int(unk_mask[i, j]) <= deltas[0]:  # child j can be deleted
-                            # auxh, auxc is assigned by its (1-j) child
-                            for (aux, x) in [(auxh, h), (auxc, c)]:
-                                aux[i, deltas[0], deltas[1], deltas[2], :] = \
-                                    aux[i, deltas[0], deltas[1], deltas[2], :].merge(
-                                        x[i, 1 - j, deltas[0] - int(unk_mask[i, j]), deltas[1], deltas[2], :])
+        auxh = []
+        auxc = []
+        for delta0 in range(self.deltas_p1[0]):
+            auxh_iter = ibp.IntervalBoundedTensor.bottom(
+                (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size), device=self.device)
+            auxc_iter = auxh_iter.clone()
+            for sub_tree_delta0 in range(1, delta0 + 1):
+                for (aux, x) in [(auxh_iter, h), (auxc_iter, c)]:
+                    aux_l = ibp.where((unk_mask[:, 0] == sub_tree_delta0).view(-1, 1, 1, 1),
+                                      # n, Ins, Sub, d
+                                      x[:, 1, delta0 - sub_tree_delta0],
+                                      ibp.IntervalBoundedTensor.bottom(
+                                          (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
+                                          device=self.device))
+                    aux.merge(aux_l)
+                    aux_r = ibp.where((unk_mask[:, 1] == sub_tree_delta0).view(-1, 1, 1, 1),
+                                      # n, Ins, Sub, d
+                                      x[:, 0, delta0 - sub_tree_delta0],
+                                      ibp.IntervalBoundedTensor.bottom(
+                                          (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
+                                          device=self.device))
+                    aux.merge(aux_r)
 
+            auxh.append(auxh_iter.unsqueeze(dim=1))
+            auxc.append(auxc_iter.unsqueeze(dim=1))
+
+        auxh = ibp.cat(auxh, dim=1)
+        auxc = ibp.cat(auxc, dim=1)
         new_h_cat = ibp.cat(new_h_cat, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2],
-                                                  self.h_size * 2)
+                                                   self.h_size * 2)
         new_c = ibp.cat(new_c, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size)
         ret = {}
         add(ret, "iou", self.U_iou(new_h_cat))

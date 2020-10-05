@@ -925,6 +925,35 @@ def load_datasets(device, opts):
     return train_data, dev_data, word_mat, attack_surface
 
 
+def num_correct_multi_classes(model_output, gold_labels, num_classes):
+    """
+    Given the output of model and gold labels returns number of correct and certified correct
+    predictions
+    Args:
+      - model_output: output of the model, could be ibp.IntervalBoundedTensor or torch.Tensor
+      - gold_labels: torch.Tensor, should be of size 1 per sample, 1 for positive 0 for negative
+    Returns:
+      - num_correct: int - number of correct predictions from the actual model output
+      - num_cert_correct - number of bounds-certified correct predictions if the model_output was an
+          IntervalBoundedTensor, 0 otherwise.
+    """
+    if isinstance(model_output, ibp.IntervalBoundedTensor):
+        logits = model_output.val
+        num_cert_correct = 0
+        for i, y in enumerate(gold_labels):
+            y = int(y)
+            num_cert_correct += all(
+                j == y or (model_output.lb[i][y].item() > model_output.ub[i][j].item()) for j in range(num_classes))
+    else:
+        logits = model_output
+        num_cert_correct = 0
+    pred = torch.argmax(logits, dim=1)
+    num_correct = sum(
+        pred[i].item() == y.item() for i, y in enumerate(gold_labels)
+    )
+    return num_correct, num_cert_correct
+
+
 def num_correct(model_output, gold_labels):
     """
     Given the output of model and gold labels returns number of correct and certified correct
@@ -1183,6 +1212,10 @@ class TextClassificationTreeDataset(data_util.ProcessedDataset):
             x_bounded = ibp.DiscreteChoiceTensorWithUNK(x_torch, choices_torch, choices_mask, mask_torch, unk_mask)
             examples.append(dict(x=x_bounded, mask=mask_torch, trees=[tree], rawx=all_words))
         return cls(trees, vocab, examples)
+
+    @staticmethod
+    def example_len(example):
+        return example['x'].shape[1]
 
     @staticmethod
     def collate_examples(examples):
