@@ -279,11 +279,8 @@ def main(args):
     np.random.seed(args.seed)
     th.manual_seed(args.seed)
     th.cuda.manual_seed(args.seed)
-
-    cuda = args.gpu >= 0
-    device = th.device('cuda:{}'.format(args.gpu)) if cuda else th.device('cpu')
-    if cuda:
-        th.cuda.set_device(args.gpu)
+    
+    device = th.device('cuda') if th.cuda.is_available() else th.device('cpu')
 
     trainset = SSTDataset(mode='train')
     trainset_vocab = trainset.vocab
