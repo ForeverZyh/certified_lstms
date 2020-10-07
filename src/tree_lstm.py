@@ -166,10 +166,10 @@ class TreeLSTMCellDP(nn.Module):
             h_cat = ibp.cat([h_left, h_right], dim=-1)
             f_cat = ibp.activation(th.sigmoid, self.U_f(h_cat))  # (n, 2 * d)
             c = f_cat[:, :self.h_size] * c_left + f_cat[:, self.h_size:] * c_right
-            return h_cat, c
+            return self.U_iou(h_cat), c
 
-        # (n, Del, Ins, Sub, 2 * d)
-        new_h_cat = []
+        # (n, Del, Ins, Sub, 3 * d)
+        new_iou = []
         # (n, Del, Ins, Sub, d)
         new_c = []
         for deltas in itertools.product(*self.deltas_p1_ranges):
@@ -182,7 +182,7 @@ class TreeLSTMCellDP(nn.Module):
                                   c[:, 0, deltas_left[0], deltas_left[1], deltas_left[2], :],
                                   c[:, 1, deltas_right[0], deltas_right[1], deltas_right[2], :])
                 piece = ibp.merge(piece, tmp)
-            new_h_cat.append(piece[0].unsqueeze(1))
+            new_iou.append(piece[0].unsqueeze(1))
             new_c.append(piece[1].unsqueeze(1))
 
         auxh = []
@@ -213,11 +213,11 @@ class TreeLSTMCellDP(nn.Module):
 
         auxh = ibp.cat(auxh, dim=1)
         auxc = ibp.cat(auxc, dim=1)
-        new_h_cat = ibp.cat(new_h_cat, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2],
-                                                   self.h_size * 2)
+        new_iou = ibp.cat(new_iou, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2],
+                                               self.h_size * 3)
         new_c = ibp.cat(new_c, dim=1).view(-1, self.deltas_p1[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size)
         ret = {}
-        add(ret, "iou", self.U_iou(new_h_cat))
+        add(ret, "iou", new_iou)
         add(ret, "c", new_c)
         add(ret, "auxh", auxh)
         add(ret, "auxc", auxc)
@@ -226,9 +226,11 @@ class TreeLSTMCellDP(nn.Module):
 
     def apply_node_func_dp(self, nodes):
         iou = get(nodes.data, 'iou') + self.b_iou  # (n, Del, Ins, Sub, d * 3)
-        iou = ibp.activation(th.sigmoid, iou)
         i, o, u = iou[:, :, :, :, :self.h_size], iou[:, :, :, :, self.h_size: self.h_size * 2], iou[:, :, :, :,
                                                                                                 self.h_size * 2:]
+        i = ibp.activation(th.sigmoid, i)
+        o = ibp.activation(th.sigmoid, o)
+        u = ibp.activation(th.tanh, u)
         c = i * u + get(nodes.data, 'c')
         h = o * ibp.activation(th.tanh, c)
         auxh = get(nodes.data, 'auxh')
@@ -371,8 +373,11 @@ class TreeLSTMDP(nn.Module):
             iou_ibp = self.cell.W_iou(self.dropout(z_interval)) * mask.float()  # (nodes, d * 3)
             iou_x[:, :, :, 1, :] = iou_ibp.view(n, 1, 1, d * 3)  # (nodes, 1, 1, 1, d * 3)
         if self.deltas[1] > 0:  # if has Ins
-            iou = th.sigmoid(iou_x.val[:, 0, 0, 0, :])  # (nodes, d * 3)
+            iou = iou_x.val[:, 0, 0, 0, :]  # (nodes, d * 3)
             i, o, u = iou[:, :d], iou[:, d: d * 2], iou[:, d * 2:]
+            i = th.sigmoid(i)
+            o = th.sigmoid(o)
+            u = th.tanh(u)
             ci = i * u
             hi = o * th.tanh(ci)
             h_cat = hi.repeat(1, 2)  # (nodes, d * 2)
