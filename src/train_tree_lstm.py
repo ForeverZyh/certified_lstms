@@ -236,10 +236,7 @@ def main_test(args):
     th.manual_seed(args.seed)
     th.cuda.manual_seed(args.seed)
 
-    cuda = args.gpu >= 0
-    device = th.device('cuda:{}'.format(args.gpu)) if cuda else th.device('cpu')
-    if cuda:
-        th.cuda.set_device(args.gpu)
+    device = th.device('cuda') if th.cuda.is_available() else th.device('cpu')
 
     testset = SSTDataset(mode='test')
     trainset_vocab = testset.vocab
@@ -328,7 +325,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('out_dir', help='Directory to store and load output')
     # TreeLSTM
-    parser.add_argument('--gpu', type=int, default=-1)
     parser.add_argument('--seed', type=int, default=41)
     parser.add_argument('--batch-size', type=int, default=20)
     parser.add_argument('--child-sum', action='store_true')
