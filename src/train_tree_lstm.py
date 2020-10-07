@@ -378,6 +378,7 @@ if __name__ == '__main__':
 
     np.random.seed(args.rng_seed)
     th.manual_seed(args.torch_seed)
+    th.set_num_threads(8)
     if args.gpu_id is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     if not args.test:
