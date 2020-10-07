@@ -21,7 +21,7 @@ import dgl
 from dgl.data.tree import SSTDataset
 
 from tree_lstm import TreeLSTM, TreeLSTMDP
-from text_classification import TextClassificationTreeDataset, num_correct_multi_classes
+from text_classification import TextClassificationTreeDataset, num_correct_multi_classes, ExhaustiveAdversary
 import vocabulary
 import data_util
 import attacks
@@ -231,6 +231,53 @@ def train(args, model, train_loader, dev_loader, device, trainset_vocab):
             th.save(model.state_dict(), model_save_path)
 
 
+def main_test(args):
+    np.random.seed(args.seed)
+    th.manual_seed(args.seed)
+    th.cuda.manual_seed(args.seed)
+
+    cuda = args.gpu >= 0
+    device = th.device('cuda:{}'.format(args.gpu)) if cuda else th.device('cpu')
+    if cuda:
+        th.cuda.set_device(args.gpu)
+
+    testset = SSTDataset(mode='test')
+    trainset_vocab = testset.vocab
+    PAD_WORD = testset.PAD_WORD
+    vocab, word_mat = vocabulary.Vocabulary.read_word_vecs_tree_lstm(trainset_vocab, args.glove_dir, args.glove, device)
+    attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(args.pddb_file, args.use_fewer_sub)
+
+    testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, tree_data_vocab=trainset_vocab,
+                                                          PAD_WORD=PAD_WORD, attack_surface=attack_surface,
+                                                          perturbation=args.perturbation)
+    test_loader = testset.get_loader(args.batch_size)
+    if args.adversary == 'exhaustive':
+        adversary = ExhaustiveAdversary(attack_surface, args.perturbation)
+        pass
+    model = TreeLSTMDP(device,
+                       len(testset.vocab),
+                       word_mat.shape[1],
+                       args.h_size,
+                       num_classes,
+                       args.dropout,
+                       cell_type='childsum' if args.child_sum else 'nary',
+                       pretrained_emb=word_mat, perturbation=args.perturbation,
+                       no_wordvec_layer=args.no_wordvec_layer).to(device)
+    if args.load_dir:
+        try:
+            if args.load_ckpt is None:
+                load_fn = sorted(glob.glob(os.path.join(args.load_dir, 'model-checkpoint-[0-9]+.pth')))[-1]
+            else:
+                load_fn = os.path.join(args.load_dir, 'model-checkpoint-%d.pth' % args.load_ckpt)
+            print('Loading model from %s.' % load_fn)
+            state_dict = dict(th.load(load_fn, map_location=th.device('cpu')))
+            model.load_state_dict(state_dict)
+            print('Finished loading model.')
+        except Exception as ex:
+            print("Couldn't load model, starting anew: {}".format(ex))
+    test(model, test_loader, device, "Test")
+
+
 def main(args):
     np.random.seed(args.seed)
     th.manual_seed(args.seed)
@@ -274,6 +321,7 @@ def main(args):
                        no_wordvec_layer=args.no_wordvec_layer).to(device)
     print(model)
     train(args, model, train_loader, dev_loader, device, trainset_vocab)
+    test(model, test_loader, device, "Test")
 
 
 if __name__ == '__main__':
@@ -293,7 +341,12 @@ if __name__ == '__main__':
     parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
     parser.add_argument('--clip-grad-norm', type=float, default=0.25)
 
+    # Loading
+    parser.add_argument('--load-dir', '-L', help='Where to load checkpoint')
+    parser.add_argument('--load-ckpt', type=int, default=None, help='Which checkpoint to load')
+
     # Adversary
+    parser.add_argument('--adversary', '-a', choices=['exhaustive'], default=None, help='Which adversary to test on')
     parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
     parser.add_argument('--perturbation', type=str, default=None)
     parser.add_argument('--aug-perturbation', type=str, default=None)
@@ -327,9 +380,12 @@ if __name__ == '__main__':
     th.manual_seed(args.torch_seed)
     if args.gpu_id is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
-    if not os.path.exists(args.out_dir):
-        os.makedirs(args.out_dir)
-    with open(os.path.join(args.out_dir, 'log.txt'), 'w') as f:
-        print(sys.argv, file=f)
-        print(args, file=f)
-    main(args)
+    if not args.test:
+        if not os.path.exists(args.out_dir):
+            os.makedirs(args.out_dir)
+        with open(os.path.join(args.out_dir, 'log.txt'), 'w') as f:
+            print(sys.argv, file=f)
+            print(args, file=f)
+        main(args)
+    else:
+        main_test(args)
