@@ -14,7 +14,6 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
-import tensorflow_datasets as tfds
 import dgl
 import networkx as nx
 
@@ -1342,7 +1341,7 @@ class SST2Dataset(TextClassificationDataset):
 
     @classmethod
     def read_text(cls, sst2_dir, split):
-
+        import tensorflow_datasets as tfds
         def prepare_ds(ds):
             data = []
             num_pos = 0
