@@ -60,7 +60,7 @@ class Vocabulary(object):
         word = toks[0]
         if word in pre_vocab:
           found += 1
-          vecs[pre_vocab[word]] = np.array([float(x) for x in toks[1:]])
+          vecs[pre_vocab[word] + 1] = np.array([float(x) for x in toks[1:]])
     print('Found %d/%d words in %s' % (found, len(pre_vocab), fn))
     word_mat = torch.tensor(vecs, dtype=torch.float, device=device)
     if normalize:

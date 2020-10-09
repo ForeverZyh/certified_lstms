@@ -46,7 +46,7 @@ def test(model, data, device, name):
         for batch in tqdm(data):
             batch = data_util.dict_batch_to_device(batch, device)
             g = batch['trees']
-            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degree(i) == 0]
+            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
             n = g.number_of_nodes()
             h = th.zeros((n, args.h_size)).to(device)
             c = th.zeros((n, args.h_size)).to(device)
@@ -137,7 +137,7 @@ def train(args, model, train_loader, dev_loader, device, trainset_vocab):
                 batch = data_util.dict_batch_to_device(batch, device)
                 g = batch['trees']
                 target = batch['y'].long()
-                root_ids = [i for i in range(g.number_of_nodes()) if g.out_degree(i) == 0]
+                root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
                 n = g.number_of_nodes()
                 h = th.zeros((n, args.h_size)).to(device)
                 c = th.zeros((n, args.h_size)).to(device)
@@ -332,7 +332,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
-    parser.add_argument('--clip-grad-norm', type=float, default=0.25)
+    parser.add_argument('--clip-grad-norm', type=float, default=None)
 
     # Loading
     parser.add_argument('--load-dir', '-L', help='Where to load checkpoint')
@@ -363,14 +363,13 @@ if __name__ == '__main__':
     parser.add_argument('--glove', '-g', choices=vocabulary.GLOVE_CONFIGS, default='840B.300d')
 
     # Other
-    parser.add_argument('--rng-seed', type=int, default=123456)
-    parser.add_argument('--torch-seed', type=int, default=1234567)
     parser.add_argument('--gpu-id', type=str, default=None)
     args = parser.parse_args()
     print(args)
 
-    np.random.seed(args.rng_seed)
-    th.manual_seed(args.torch_seed)
+    np.random.seed(args.seed)
+    th.manual_seed(args.seed)
+    th.cuda.manual_seed(args.seed)
     th.set_num_threads(8)
     if args.gpu_id is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
