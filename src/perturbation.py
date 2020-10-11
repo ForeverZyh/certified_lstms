@@ -112,21 +112,23 @@ class Perturbation:
                 raise NotImplementedError
 
     def get_output_for_baseline_final_state(self):
-        ret = [set() for _ in range(len(self.ipt) * 2)]
-        for i in range(len(ret)):
-            if i % 2 == 0:
-                ret[i].add(self.ipt[i // 2])
+        ret = [[] for _ in range(len(self.ipt))]
+        for i in range(len(self.ipt)):
+            ret[i] = set()
+            for tran in self.trans:
+                if isinstance(tran, Sub) and tran.phi(i):
+                    choices = tran.transformer(i)
+                    for choice in choices:
+                        ret[i].add(choice[0])
+            if self.has_del:
                 for tran in self.trans:
-                    if isinstance(tran, Sub) and tran.phi(i // 2):
-                        choices = tran.transformer(i // 2)
-                        for choice in choices:
-                            ret[i].add(choice[0])
-            else:
-                ret[i].add(UNK)  # add dummy word for Ins
-            if self.has_del and i % 2 == 0:
-                for tran in self.trans:
-                    if isinstance(tran, Del) and tran.phi(i // 2):
+                    if isinstance(tran, Del) and tran.phi(i):
                         ret[i].add(UNK)  # add dummy word for Del
+            if self.ipt[i] in ret[i]:
+                ret[i] = list(ret[i])
+            else:
+                ret[i] = [self.ipt[i]] + list(ret[i])
+
             # TODO: This is a workaround for Dup, i.e., duplicate a previous word. One can have a general Ins, or even
             # TODO: conditional Ins, but that will be a completely different implementation.
             # TODO: This workaround is efficient and specially designed for Dup. However, a more general implementation
@@ -136,7 +138,7 @@ class Perturbation:
             #         if isinstance(tran, Ins) and tran.phi(i // 2):
             #             ret[i].add(self.ipt[i // 2])  # add word for Ins
 
-        return [list(x) for x in ret if len(x) > 1 or (UNK not in x and len(x) == 1)]
+        return ret
 
     def get_output_for_baseline(self):
         ret = [set() for _ in self.ipt]
