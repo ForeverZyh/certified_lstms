@@ -66,6 +66,10 @@ class IntervalBoundedTensor(BoundedTensor):
         return IntervalBoundedTensor(torch.zeros(x, device=device), torch.ones(x, device=device) * 1e16,
                                      torch.ones(x, device=device) * (-1e16))
 
+    @staticmethod
+    def point(x):
+        return IntervalBoundedTensor(x, x.clone(), x.clone())
+
     ### Reimplementations of torch.Tensor methods
     def __neg__(self):
         return IntervalBoundedTensor(-self.val, -self.ub, -self.lb)
@@ -170,8 +174,8 @@ class DiscreteChoiceTensorWithUNK(BoundedTensor):
         """
         choice_mask_mat = (((1 - self.choice_mask).float() * 1e16)).unsqueeze(-1)  # *, C, 1
         seq_mask_mat = self.sequence_mask.unsqueeze(-1).unsqueeze(-1).float()
-        lb = torch.min((self.choice_mat + choice_mask_mat) * seq_mask_mat, -2)[0]  # *, d
-        ub = torch.max((self.choice_mat - choice_mask_mat) * seq_mask_mat, -2)[0]  # *, d
+        lb = torch.min((self.choice_mat + choice_mask_mat) * seq_mask_mat, -2)[0] * self.sequence_mask.unsqueeze(-1)
+        ub = torch.max((self.choice_mat - choice_mask_mat) * seq_mask_mat, -2)[0] * self.sequence_mask.unsqueeze(-1)
         val = self.val * self.sequence_mask.unsqueeze(-1)
         if eps != 1.0:
             lb = val - (val - lb) * eps

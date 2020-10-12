@@ -605,7 +605,7 @@ class ExhaustiveAdversary(Adversary):
                         preds_logits[i] <= interval_pred[i] + 1e-5 for i in range(interval_pred.shape[0]) if
                         i != target)):
                     print("Fail! ", preds_logits, interval_pred, target)
-                    print(example["rawx"])
+                    print(all_raw)
                     _ = input("Press any key to continue...")
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds) if is_logits_correct(p)]
                 if len(cur_adv_exs) > 0:

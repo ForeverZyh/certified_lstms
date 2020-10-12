@@ -402,16 +402,16 @@ class TreeLSTMDP(nn.Module):
         unk_mask = (1 - unk_mask).long() if unk_mask is not None else th.zeros_like(mask).long()
         h = dup(h)
         auxh = ibp.IntervalBoundedTensor.bottom_like(h)
-        h = ibp.IntervalBoundedTensor(h, h, h)
+        h = ibp.IntervalBoundedTensor.point(h)
         c = dup(c)
         auxc = ibp.IntervalBoundedTensor.bottom_like(c)
-        c = ibp.IntervalBoundedTensor(c, c, c)
+        c = ibp.IntervalBoundedTensor.point(c)
 
         iou_x = dup(self.cell.W_iou(self.dropout(z)) * mask.float())  # (nodes, Del, Ins, Sub, d * 3)
-        iou_x = ibp.IntervalBoundedTensor(iou_x, iou_x, iou_x)
+        iou_x = ibp.IntervalBoundedTensor.point(iou_x)
         if self.deltas[2] > 0:  # if has Sub
             iou_ibp = self.cell.W_iou(self.dropout(z_interval)) * mask.float()  # (nodes, d * 3)
-            iou_x[:, :, :, 1, :] = iou_ibp.view(n, 1, 1, d * 3)  # (nodes, 1, 1, 1, d * 3)
+            iou_x[:, 0, 0, 1, :] = iou_ibp  # (nodes, d * 3)
         if self.deltas[1] > 0:  # if has Ins
             iou = iou_x.val[:, 0, 0, 0, :]  # (nodes, d * 3)
             i, o, u = iou[:, :d], iou[:, d: d * 2], iou[:, d * 2:]
@@ -424,10 +424,10 @@ class TreeLSTMDP(nn.Module):
             f_cat = th.sigmoid(self.cell.U_f(h_cat))
             ci = (f_cat[:, :d] + f_cat[:, d:]) * ci * mask.float()
             iou = self.cell.U_iou(h_cat) * mask.float()
-            iou = ibp.IntervalBoundedTensor(iou, iou, iou)
-            iou_x[:, :, 1, :, :] = iou.view(n, 1, 1, d * 3)
-            ci = ibp.IntervalBoundedTensor(ci, ci, ci)
-            c[:, :, 1, :, :] = ci.view(n, 1, 1, d)
+            iou = ibp.IntervalBoundedTensor.point(iou)
+            iou_x[:, 0, 1, 0, :] = iou
+            ci = ibp.IntervalBoundedTensor.point(ci)
+            c[:, 0, 1, 0, :] = ci
 
         add(g.ndata, "iou", iou_x)
         add(g.ndata, "h", h)
