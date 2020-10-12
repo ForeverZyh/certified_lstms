@@ -553,6 +553,75 @@ class ExhaustiveAdversary(Adversary):
 
         return is_correct, adv_exs
 
+    def run_tree(self, model, dataset, device, trainset_vocab, PAD_WORD, opts=None):
+        is_correct = []
+        adv_exs = []
+        tree_data_vocab_key_list = list(trainset_vocab.keys())
+        for example in tqdm(dataset.examples):
+            # First query the example itself
+            g = example["trees"][0]
+            x = " ".join(example["rawx"])
+            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
+            target = g.ndata['y'].long()[root_ids].item()
+            orig_pred, interval_pred = model.query(
+                example["trees"], dataset.vocab, device, trainset_vocab, PAD_WORD, return_bounds=True,
+                attack_surface=self.attack_surface, perturbation=self.perturbation)
+            orig_pred = orig_pred[0]
+            interval_pred = interval_pred[0]
+
+            def is_logits_correct(x):
+                return all(x[i].item() < x[target].item() for i in range(x.shape[0]) if i != target)
+
+            cert_correct = is_logits_correct(interval_pred)
+            print('Orig logits: %s, Cert bounds: %s, target: %d, cert_correct=%s' % (
+                ",".join(["%.4f" % x.item() for x in orig_pred]), ",".join(["%.4f" % x.item() for x in interval_pred]),
+                target, cert_correct))
+            if not is_logits_correct(orig_pred):
+                print('ORIGINAL PREDICTION WAS WRONG')
+                is_correct.append(0)
+                adv_exs.append(x)
+                continue
+            elif cert_correct:
+                print('CERTIFY CORRECT')
+                is_correct.append(1)
+                adv_exs.append([])
+                continue
+
+            text = example["rawx"]
+            swaps = self.attack_surface.get_swaps(text)
+            choices = [[s for s in cur_swaps if s in trainset_vocab] for w, cur_swaps in zip(text, swaps) if
+                       w in trainset_vocab]
+
+            is_correct_single = True
+            for batch_x in ExhaustiveAdversary.DelDupSubTree(*self.deltas, text, g, trainset_vocab, choices,
+                                                             batch_size=opts.batch_size):
+                all_raw = [" ".join([tree_data_vocab_key_list[x.item()] for x in g.ndata["x"] if x.item() != PAD_WORD])
+                           for g in batch_x]
+                preds = model.query(batch_x, dataset.vocab, device, trainset_vocab, PAD_WORD)
+                preds_logits = preds.max(dim=0)[0]
+                preds_min = preds.min(dim=0)[0]
+                preds_logits[target] = preds_min[target]
+                if not (preds_min[target] + 1e-5 >= interval_pred[target] and all(
+                        preds_logits[i] <= interval_pred[i] + 1e-5 for i in range(interval_pred.shape[0]) if
+                        i != target)):
+                    print("Fail! ", preds_logits, interval_pred, target)
+                    print(example["rawx"])
+                    _ = input("Press any key to continue...")
+                cur_adv_exs = [all_raw[i] for i, p in enumerate(preds) if is_logits_correct(p)]
+                if len(cur_adv_exs) > 0:
+                    print(cur_adv_exs)
+                    adv_exs.append(cur_adv_exs)
+                    is_correct_single = False
+                    break
+
+            # TODO: count the number
+            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            is_correct.append(is_correct_single)
+            if is_correct_single:
+                adv_exs.append([])
+
+        return is_correct, adv_exs
+
     @staticmethod
     def DelDupSubWord(a, b, c, x, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
         end_pos = len(x)

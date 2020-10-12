@@ -30,7 +30,8 @@ SSTBatch = collections.namedtuple('SSTBatch', ['graph', 'mask', 'wordid', 'label
 num_classes = 5
 
 
-def test(model, data, device, name):
+def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None, PAD_WORD =None):
+    data = dataset.get_loader(args.batch_size)
     model.eval()
     loss_func = CrossEntropyLoss()
     results = {
@@ -61,11 +62,18 @@ def test(model, data, device, name):
     results['cert_acc'] = 100 * results['num_cert_correct'] / results['num_total']
     out_str = "  {name} loss = {loss:.2f}; accuracy: {num_correct}/{num_total} = {clean_acc:.2f}, certified {num_cert_correct}/{num_total} = {cert_acc:.2f}".format(
         **results)
+    if adversary:
+        adv_correct, adv_exs = adversary.run_tree(model, dataset, device, trainset_vocab, PAD_WORD, opts=args)
+        results['num_adv_correct'] = sum(adv_correct)
+        results['adv_acc'] = 100 * results['num_adv_correct'] / results['num_total']
+        out_str += ', adversarial %d/%d = %.2f' % (
+            results['num_adv_correct'], results['num_total'], results['adv_acc'])
     print(out_str)
     return results
 
 
-def train(args, model, train_loader, dev_loader, device, trainset_vocab):
+def train(args, model, trainset, devset, device, trainset_vocab):
+    train_loader = trainset.get_loader(args.batch_size)
     params_ex_emb = [x for x in list(model.parameters()) if x.requires_grad and x.size(0) != len(trainset_vocab) + 1]
     params_emb = list(model.embedding.parameters())
 
@@ -189,7 +197,7 @@ def train(args, model, train_loader, dev_loader, device, trainset_vocab):
         print(acc_str)
         is_best = False
 
-        dev_results = test(model, dev_loader, device, "Dev")
+        dev_results = test(args, model, devset, device, "Dev")
         epoch['dev'] = dev_results
         all_epoch_stats['acc']['dev']['clean'].append(dev_results['clean_acc'])
         all_epoch_stats['acc']['dev']['cert'].append(dev_results['cert_acc'])
@@ -247,10 +255,10 @@ def main_test(args):
     testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, tree_data_vocab=trainset_vocab,
                                                           PAD_WORD=PAD_WORD, attack_surface=attack_surface,
                                                           perturbation=args.perturbation)
-    test_loader = testset.get_loader(args.batch_size)
     if args.adversary == 'exhaustive':
         adversary = ExhaustiveAdversary(attack_surface, args.perturbation)
-        pass
+    else:
+        adversary = None
     model = TreeLSTMDP(device,
                        len(testset.vocab),
                        word_mat.shape[1],
@@ -272,14 +280,14 @@ def main_test(args):
             print('Finished loading model.')
         except Exception as ex:
             print("Couldn't load model, starting anew: {}".format(ex))
-    test(model, test_loader, device, "Test")
+    test(args, model, testset, device, "Test", adversary=adversary, trainset_vocab=trainset_vocab, PAD_WORD =PAD_WORD)
 
 
 def main(args):
     np.random.seed(args.seed)
     th.manual_seed(args.seed)
     th.cuda.manual_seed(args.seed)
-    
+
     device = th.device('cuda') if th.cuda.is_available() else th.device('cpu')
 
     trainset = SSTDataset(mode='train')
@@ -290,19 +298,16 @@ def main(args):
     trainset = TextClassificationTreeDataset.from_raw_data(trainset, vocab, tree_data_vocab=trainset_vocab,
                                                            PAD_WORD=PAD_WORD, attack_surface=attack_surface,
                                                            perturbation=args.perturbation)
-    train_loader = trainset.get_loader(args.batch_size)
 
     devset = SSTDataset(mode='dev')
     devset = TextClassificationTreeDataset.from_raw_data(devset, vocab, tree_data_vocab=trainset_vocab,
                                                          PAD_WORD=PAD_WORD, attack_surface=attack_surface,
                                                          perturbation=args.perturbation)
-    dev_loader = devset.get_loader(args.batch_size)
 
     testset = SSTDataset(mode='test')
     testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, tree_data_vocab=trainset_vocab,
                                                           PAD_WORD=PAD_WORD, attack_surface=attack_surface,
                                                           perturbation=args.perturbation)
-    test_loader = testset.get_loader(args.batch_size)
 
     model = TreeLSTMDP(device,
                        len(trainset.vocab),
@@ -314,8 +319,8 @@ def main(args):
                        pretrained_emb=word_mat, perturbation=args.perturbation,
                        no_wordvec_layer=args.no_wordvec_layer).to(device)
     print(model)
-    train(args, model, train_loader, dev_loader, device, trainset_vocab)
-    test(model, test_loader, device, "Test")
+    train(args, model, trainset, devset, device, trainset_vocab)
+    test(args, model, testset, device, "Test")
 
 
 if __name__ == '__main__':

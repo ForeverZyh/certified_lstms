@@ -13,6 +13,8 @@ import dgl
 
 import ibp
 from perturbation import Perturbation
+from text_classification import TextClassificationTreeDataset
+import data_util
 
 
 class TreeLSTMCell(nn.Module):
@@ -191,6 +193,7 @@ class TreeLSTMCellDP(nn.Module):
             auxh_iter = ibp.IntervalBoundedTensor.bottom(
                 (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size), device=self.device)
             auxc_iter = auxh_iter.clone()
+            # TODO optimize with x[inds, 1, delta0 - unk_mask[:, 0]], x[inds, 0, delta0 - unk_mask[:, 1]]
             for sub_tree_delta0 in range(1, delta0 + 1):
                 for (aux, x) in [(auxh_iter, h), (auxc_iter, c)]:
                     aux_l = ibp.where((unk_mask[:, 0] == sub_tree_delta0).view(-1, 1, 1, 1),
@@ -279,6 +282,7 @@ class TreeLSTMDP(nn.Module):
         self.deltas = Perturbation.str2deltas(perturbation)
         self.deltas_p1 = [delta + 1 for delta in self.deltas]
         self.x_size = x_size
+        self.h_size = h_size
         self.embedding = ibp.Embedding(num_vocabs, x_size)
         if pretrained_emb is not None:
             print('Using glove')
@@ -295,6 +299,42 @@ class TreeLSTMDP(nn.Module):
         else:
             self.linear_input = ibp.Linear(x_size, h_size)
             self.cell = cell(h_size, h_size, self.deltas_p1, device)
+
+    def query(self, x, vocab, device, tree_data_vocab, PAD_WORD, return_bounds=False, attack_surface=None,
+              perturbation=None):
+        """Query the model on a Dataset.
+
+        Args:
+          x: a list of trees
+          vocab: vocabulary
+          device: torch device.
+          tree_data_vocab: original vocabulary in the dataset
+          PAD_WORD: PAD_WORD in the dataset
+
+        Returns: list of logits of same length as |examples|.
+        """
+        dataset = TextClassificationTreeDataset.from_raw_data(x, vocab, tree_data_vocab=tree_data_vocab,
+                                                              PAD_WORD=PAD_WORD, attack_surface=attack_surface,
+                                                              perturbation=perturbation)
+        data = dataset.get_loader(len(x))
+
+        with th.no_grad():
+            batch = data_util.dict_batch_to_device(next(iter(data)), device)
+            g = batch['trees']
+            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
+            target = batch['y'].long()[root_ids]
+            n = g.number_of_nodes()
+            h = th.zeros((n, self.h_size)).to(device)
+            c = th.zeros((n, self.h_size)).to(device)
+
+            logits = self.forward(batch, g, h, c, compute_bounds=return_bounds)[root_ids]
+            if return_bounds:
+                r = logits.ub.clone()
+                inds = th.arange(r.shape[0], device=device).long()
+                r[inds, target] = logits.lb[inds, target]
+                return logits.val, r
+            else:
+                return logits
 
     def forward(self, batch, g, h, c, compute_bounds=True, cert_eps=1.0):
         """Compute tree-lstm prediction given a batch.
