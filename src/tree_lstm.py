@@ -190,29 +190,27 @@ class TreeLSTMCellDP(nn.Module):
         auxh = []
         auxc = []
         for delta0 in range(self.deltas_p1[0]):
-            auxh_iter = ibp.IntervalBoundedTensor.bottom(
-                (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size), device=self.device)
-            auxc_iter = auxh_iter.clone()
-            # TODO optimize with x[inds, 1, delta0 - unk_mask[:, 0]], x[inds, 0, delta0 - unk_mask[:, 1]]
-            for sub_tree_delta0 in range(1, delta0 + 1):
-                for (aux, x) in [(auxh_iter, h), (auxc_iter, c)]:
-                    aux_l = ibp.where((unk_mask[:, 0] == sub_tree_delta0).view(-1, 1, 1, 1),
-                                      # n, Ins, Sub, d
-                                      x[:, 1, delta0 - sub_tree_delta0],
-                                      ibp.IntervalBoundedTensor.bottom(
-                                          (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
-                                          device=self.device))
-                    aux.merge(aux_l)
-                    aux_r = ibp.where((unk_mask[:, 1] == sub_tree_delta0).view(-1, 1, 1, 1),
-                                      # n, Ins, Sub, d
-                                      x[:, 0, delta0 - sub_tree_delta0],
-                                      ibp.IntervalBoundedTensor.bottom(
-                                          (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
-                                          device=self.device))
-                    aux.merge(aux_r)
+            inds = th.arange(unk_mask.shape[0])
+            clip_unk_mask0 = th.clamp(unk_mask[:, 0], 1, delta0).long()
+            clip_unk_mask1 = th.clamp(unk_mask[:, 1], 1, delta0).long()
+            aux_list = []
+            for x in [h, c]:
+                aux_l = ibp.where(((unk_mask[:, 0] > 0) & (unk_mask[:, 0] <= delta0)).view(-1, 1, 1, 1),
+                                  # n, Ins, Sub, d
+                                  x[inds, 1, delta0 - clip_unk_mask0],
+                                  ibp.IntervalBoundedTensor.bottom(
+                                      (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
+                                      device=self.device))
+                aux_r = ibp.where(((unk_mask[:, 1] > 0) & (unk_mask[:, 1] <= delta0)).view(-1, 1, 1, 1),
+                                  # n, Ins, Sub, d
+                                  x[inds, 0, delta0 - clip_unk_mask1],
+                                  ibp.IntervalBoundedTensor.bottom(
+                                      (h.shape[0], self.deltas_p1[1], self.deltas_p1[2], self.h_size),
+                                      device=self.device))
+                aux_list.append(aux_l.merge(aux_r))
 
-            auxh.append(auxh_iter.unsqueeze(dim=1))
-            auxc.append(auxc_iter.unsqueeze(dim=1))
+            auxh.append(aux_list[0].unsqueeze(dim=1))
+            auxc.append(aux_list[1].unsqueeze(dim=1))
 
         auxh = ibp.cat(auxh, dim=1)
         auxc = ibp.cat(auxc, dim=1)
