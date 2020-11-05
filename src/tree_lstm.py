@@ -411,7 +411,7 @@ class TreeLSTMDP(nn.Module):
             iou_ibp = self.cell.W_iou(self.dropout(z_interval)) * mask.float()  # (nodes, d * 3)
             iou_x[:, 0, 0, 1, :] = iou_ibp  # (nodes, d * 3)
         if self.deltas[1] > 0:  # if has Ins
-            iou = iou_x.val[:, 0, 0, 0, :]  # (nodes, d * 3)
+            iou = iou_x.val[:, 0, 0, 0, :] + self.cell.b_iou  # (nodes, d * 3)
             i, o, u = iou[:, :d], iou[:, d: d * 2], iou[:, d * 2:]
             i = th.sigmoid(i)
             o = th.sigmoid(o)
