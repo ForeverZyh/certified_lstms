@@ -22,6 +22,7 @@ import data_util
 import ibp
 import vocabulary
 from perturbation import Perturbation, Sub, Ins, Del, UNK
+from DSL.general_HotFlip import GeneralHotFlipAttack
 
 LOSS_FUNC = nn.BCEWithLogitsLoss()
 LOSS_FUNC_KEEP_DIM = nn.BCEWithLogitsLoss(reduction="none")
@@ -320,10 +321,12 @@ class LSTMDPModel(AdversarialModel):
                  no_wordvec_layer=False, bidirectional=True, perturbation=None, baseline=False):
         super(LSTMDPModel, self).__init__()
         assert perturbation is not None
-        # TODO: to implement more discrete perturbation space
         self.perturbation = perturbation
+        self.adv_attack = False  # use to compute the gradients
+        self.out_x_vecs = None  # use to compute the gradients
         self.bidirectional = bidirectional
         self.hidden_size = hidden_size
+        self.word_vec_size = word_vec_size
         self.pool = pool
         if pool == 'final' and bidirectional:
             raise AttributeError("bidirectional not available when pool='final'")
@@ -344,6 +347,35 @@ class LSTMDPModel(AdversarialModel):
             self.fc_hidden = ibp.Linear(hidden_size, hidden_size)
         self.fc_output = ibp.Linear(hidden_size, 1)
 
+    def get_embed(self, x, ret_len=None):
+        """
+        :param x: tensor of word vector indices
+        :param ret_len: the return length, if None, the length is equal to len(x). if len(x) < ret_len, we add padding
+        :return: np array with shape (ret_len, word_vec_size)
+        """
+        if ret_len is None:
+            ret_len = len(x)
+        ret = np.zeros((ret_len, self.word_vec_size))
+        with torch.no_grad():
+            ret[:len(x)] = self.embs(x.unsqueeze(0))[0].cpu().numpy()
+        return ret
+
+    def get_grad(self, x, y):
+        """
+        :param x: tensor of word vector indices (B, len)
+        :param y: tensor of labels (B, 1)
+        :return: np array with shape (B, len, word_vec_size)
+        """
+        self.adv_attack = True
+
+        logits = self.forward(x, compute_bounds=False)
+        loss = LOSS_FUNC(logits, y)
+        loss.backward()
+
+        self.adv_attack = False
+
+        return self.out_x_vecs.grad.cpu().numpy()
+
     def forward(self, batch, compute_bounds=True, cert_eps=1.0, analysis_mode=False):
         """
         Args:
@@ -363,6 +395,9 @@ class LSTMDPModel(AdversarialModel):
 
         B = x.shape[0]
         x_vecs = self.embs(x)  # B, n, d
+        if self.adv_attack:
+            x_vecs.requires_grad = True
+            self.out_x_vecs = x_vecs
         z_interval = None
         unk_mask = None
         if not self.no_wordvec_layer:
@@ -489,6 +524,55 @@ class Adversary(object):
         raise NotImplementedError
 
 
+class HotFlipAdversary(Adversary):
+    """An Adversary that exhaustively tries all allowed perturbations.
+
+    Only practical for short sentences.
+    """
+
+    def __init__(self, victim_model, perturbation):
+        super(HotFlipAdversary, self).__init__(None)
+        self.victim_model = victim_model
+        from DSL.transformation import Ins, Del, Sub
+        self.attack = GeneralHotFlipAttack(eval(perturbation))
+
+    def run(self, model, dataset, device, opts=None):
+        is_correct = []
+        adv_exs = []
+        for x, y in tqdm(dataset.raw_data):
+            # First query the example itself
+            orig_pred = model.query(x, dataset.vocab, device)
+            if orig_pred * (2 * y - 1) <= 0:
+                print('ORIGINAL PREDICTION WAS WRONG')
+                is_correct.append(0)
+                adv_exs.append(x)
+                continue
+
+            words = x.split()
+            words = [w for w in words if w in dataset.vocab]  # test words can be outside the vocabulary, we omit them
+            # chances are that the substituted words are outside the vocabulary due to the pos tags are different from
+            # train and dev set. If that happens, the substituted words will be seen as UNK
+            ans = self.attack.gen_adv(self.victim_model, words, y, opts.adv_beam, self.victim_model.get_embed)
+            is_correct_single = True
+            all_raw = [' '.join(x_new) for x_new in ans]
+            preds = model.query(all_raw, dataset.vocab, device)
+
+            cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
+                           if p * (2 * y - 1) <= 0]
+            if len(cur_adv_exs) > 0:
+                print(cur_adv_exs)
+                adv_exs.append(cur_adv_exs)
+                is_correct_single = False
+
+            # TODO: count the number
+            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            is_correct.append(is_correct_single)
+            if is_correct_single:
+                adv_exs.append([])
+
+        return is_correct, adv_exs
+
+
 class ExhaustiveAdversary(Adversary):
     """An Adversary that exhaustively tries all allowed perturbations.
 
@@ -501,126 +585,130 @@ class ExhaustiveAdversary(Adversary):
         self.deltas = Perturbation.str2deltas(perturbation)
 
     def run(self, model, dataset, device, opts=None):
-        is_correct = []
-        adv_exs = []
-        for x, y in tqdm(dataset.raw_data):
-            # First query the example itself
-            orig_pred, (orig_lb, orig_ub) = model.query(
-                x, dataset.vocab, device, return_bounds=True,
-                attack_surface=self.attack_surface, perturbation=self.perturbation)
-            cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
-            print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
-                orig_lb, orig_pred, orig_ub, cert_correct))
-            if orig_pred * (2 * y - 1) <= 0:
-                print('ORIGINAL PREDICTION WAS WRONG')
-                is_correct.append(0)
-                adv_exs.append(x)
-                continue
-            elif cert_correct:
-                print('CERTIFY CORRECT')
-                is_correct.append(1)
-                adv_exs.append([])
-                continue
+        with torch.no_grad():
+            is_correct = []
+            adv_exs = []
+            for x, y in tqdm(dataset.raw_data):
+                # First query the example itself
+                orig_pred, (orig_lb, orig_ub) = model.query(
+                    x, dataset.vocab, device, return_bounds=True,
+                    attack_surface=self.attack_surface, perturbation=self.perturbation)
+                cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
+                print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
+                    orig_lb, orig_pred, orig_ub, cert_correct))
+                if orig_pred * (2 * y - 1) <= 0:
+                    print('ORIGINAL PREDICTION WAS WRONG')
+                    is_correct.append(0)
+                    adv_exs.append(x)
+                    continue
+                elif cert_correct:
+                    print('CERTIFY CORRECT')
+                    is_correct.append(1)
+                    adv_exs.append([])
+                    continue
 
-            words = x.split()
-            swaps = self.attack_surface.get_swaps(words)
-            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if
-                       w in dataset.vocab]
-            words = [w for w in words if w in dataset.vocab]
+                words = x.split()
+                swaps = self.attack_surface.get_swaps(words)
+                choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if
+                           w in dataset.vocab]
+                words = [w for w in words if w in dataset.vocab]
 
-            is_correct_single = True
-            for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
-                all_raw = [' '.join(x_new) for x_new in batch_x]
-                preds = model.query(all_raw, dataset.vocab, device)
-                if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
-                    print("Fail! ", preds.min(), preds.max())
-                    print("Min: ", all_raw[int(preds.min(dim=0)[1][0])])
-                    print("Max: ", all_raw[int(preds.max(dim=0)[1][0])])
-                    _ = input("Press any key to continue...")
-                cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
-                               if p * (2 * y - 1) <= 0]
-                if len(cur_adv_exs) > 0:
-                    print(cur_adv_exs)
-                    adv_exs.append(cur_adv_exs)
-                    is_correct_single = False
-                    break
+                is_correct_single = True
+                for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
+                    all_raw = [' '.join(x_new) for x_new in batch_x]
+                    preds = model.query(all_raw, dataset.vocab, device)
+                    if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
+                        print("Fail! ", preds.min(), preds.max())
+                        print("Min: ", all_raw[int(preds.min(dim=0)[1][0])])
+                        print("Max: ", all_raw[int(preds.max(dim=0)[1][0])])
+                        _ = input("Press any key to continue...")
+                    cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
+                                   if p * (2 * y - 1) <= 0]
+                    if len(cur_adv_exs) > 0:
+                        print(cur_adv_exs)
+                        adv_exs.append(cur_adv_exs)
+                        is_correct_single = False
+                        break
 
-            # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
-            is_correct.append(is_correct_single)
-            if is_correct_single:
-                adv_exs.append([])
+                # TODO: count the number
+                print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+                is_correct.append(is_correct_single)
+                if is_correct_single:
+                    adv_exs.append([])
 
-        return is_correct, adv_exs
+            return is_correct, adv_exs
 
     def run_tree(self, model, dataset, device, trainset_vocab, PAD_WORD, opts=None):
-        is_correct = []
-        adv_exs = []
-        tree_data_vocab_key_list = list(trainset_vocab.keys())
-        for example in tqdm(dataset.examples):
-            # First query the example itself
-            g = example["trees"][0]
-            x = " ".join(example["rawx"])
-            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
-            target = g.ndata['y'].long()[root_ids].item()
-            orig_pred, interval_pred = model.query(
-                example["trees"], dataset.vocab, device, trainset_vocab, PAD_WORD, return_bounds=True,
-                attack_surface=self.attack_surface, perturbation=self.perturbation)
-            orig_pred = orig_pred[0]
-            interval_pred = interval_pred[0]
+        with torch.no_grad():
+            is_correct = []
+            adv_exs = []
+            tree_data_vocab_key_list = list(trainset_vocab.keys())
+            for example in tqdm(dataset.examples):
+                # First query the example itself
+                g = example["trees"][0]
+                x = " ".join(example["rawx"])
+                root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
+                target = g.ndata['y'].long()[root_ids].item()
+                orig_pred, interval_pred = model.query(
+                    example["trees"], dataset.vocab, device, trainset_vocab, PAD_WORD, return_bounds=True,
+                    attack_surface=self.attack_surface, perturbation=self.perturbation)
+                orig_pred = orig_pred[0]
+                interval_pred = interval_pred[0]
 
-            def is_logits_correct(x):
-                return all(x[i].item() < x[target].item() for i in range(x.shape[0]) if i != target)
+                def is_logits_correct(x):
+                    return all(x[i].item() < x[target].item() for i in range(x.shape[0]) if i != target)
 
-            cert_correct = is_logits_correct(interval_pred)
-            print('Orig logits: %s, Cert bounds: %s, target: %d, cert_correct=%s' % (
-                ",".join(["%.4f" % x.item() for x in orig_pred]), ",".join(["%.4f" % x.item() for x in interval_pred]),
-                target, cert_correct))
-            if not is_logits_correct(orig_pred):
-                print('ORIGINAL PREDICTION WAS WRONG')
-                is_correct.append(0)
-                adv_exs.append(x)
-                continue
-            elif cert_correct:
-                print('CERTIFY CORRECT')
-                is_correct.append(1)
-                adv_exs.append([])
-                continue
+                cert_correct = is_logits_correct(interval_pred)
+                print('Orig logits: %s, Cert bounds: %s, target: %d, cert_correct=%s' % (
+                    ",".join(["%.4f" % x.item() for x in orig_pred]),
+                    ",".join(["%.4f" % x.item() for x in interval_pred]),
+                    target, cert_correct))
+                if not is_logits_correct(orig_pred):
+                    print('ORIGINAL PREDICTION WAS WRONG')
+                    is_correct.append(0)
+                    adv_exs.append(x)
+                    continue
+                elif cert_correct:
+                    print('CERTIFY CORRECT')
+                    is_correct.append(1)
+                    adv_exs.append([])
+                    continue
 
-            text = example["rawx"]
-            swaps = self.attack_surface.get_swaps(text)
-            choices = [[s for s in cur_swaps if s in trainset_vocab] for w, cur_swaps in zip(text, swaps) if
-                       w in trainset_vocab]
+                text = example["rawx"]
+                swaps = self.attack_surface.get_swaps(text)
+                choices = [[s for s in cur_swaps if s in trainset_vocab] for w, cur_swaps in zip(text, swaps) if
+                           w in trainset_vocab]
 
-            is_correct_single = True
-            for batch_x in ExhaustiveAdversary.DelDupSubTree(*self.deltas, text, g, trainset_vocab, choices,
-                                                             batch_size=opts.batch_size):
-                all_raw = [" ".join([tree_data_vocab_key_list[x.item()] for x in g.ndata["x"] if x.item() != PAD_WORD])
-                           for g in batch_x]
-                preds = model.query(batch_x, dataset.vocab, device, trainset_vocab, PAD_WORD)
-                preds_logits = preds.max(dim=0)[0]
-                preds_min = preds.min(dim=0)[0]
-                preds_logits[target] = preds_min[target]
-                if not (preds_min[target] + 1e-5 >= interval_pred[target] and all(
-                        preds_logits[i] <= interval_pred[i] + 1e-5 for i in range(interval_pred.shape[0]) if
-                        i != target)):
-                    print("Fail! ", preds_logits, interval_pred, target)
-                    print(all_raw)
-                    _ = input("Press any key to continue...")
-                cur_adv_exs = [all_raw[i] for i, p in enumerate(preds) if not is_logits_correct(p)]
-                if len(cur_adv_exs) > 0:
-                    print(cur_adv_exs)
-                    adv_exs.append(cur_adv_exs)
-                    is_correct_single = False
-                    break
+                is_correct_single = True
+                for batch_x in ExhaustiveAdversary.DelDupSubTree(*self.deltas, text, g, trainset_vocab, choices,
+                                                                 batch_size=opts.batch_size):
+                    all_raw = [
+                        " ".join([tree_data_vocab_key_list[x.item()] for x in g.ndata["x"] if x.item() != PAD_WORD])
+                        for g in batch_x]
+                    preds = model.query(batch_x, dataset.vocab, device, trainset_vocab, PAD_WORD)
+                    preds_logits = preds.max(dim=0)[0]
+                    preds_min = preds.min(dim=0)[0]
+                    preds_logits[target] = preds_min[target]
+                    if not (preds_min[target] + 1e-5 >= interval_pred[target] and all(
+                            preds_logits[i] <= interval_pred[i] + 1e-5 for i in range(interval_pred.shape[0]) if
+                            i != target)):
+                        print("Fail! ", preds_logits, interval_pred, target)
+                        print(all_raw)
+                        _ = input("Press any key to continue...")
+                    cur_adv_exs = [all_raw[i] for i, p in enumerate(preds) if not is_logits_correct(p)]
+                    if len(cur_adv_exs) > 0:
+                        print(cur_adv_exs)
+                        adv_exs.append(cur_adv_exs)
+                        is_correct_single = False
+                        break
 
-            # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
-            is_correct.append(is_correct_single)
-            if is_correct_single:
-                adv_exs.append([])
+                # TODO: count the number
+                print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+                is_correct.append(is_correct_single)
+                if is_correct_single:
+                    adv_exs.append([])
 
-        return is_correct, adv_exs
+            return is_correct, adv_exs
 
     @staticmethod
     def DelDupSubWord(a, b, c, x, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):

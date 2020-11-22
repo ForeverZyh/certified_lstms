@@ -15,6 +15,9 @@ import entailment
 import text_classification
 import vocabulary
 from perturbation import Perturbation
+from victim_model_wrapper import ModelWrapper
+from DSL.general_HotFlip import GeneralHotFlipAttack
+from DSL.transformation import Ins, Del, Sub
 
 
 # Maps string keys to modules that hold the relevant functions for training against
@@ -23,6 +26,7 @@ TASK_CLASSES = {
   'classification': text_classification,
   'entailment': entailment
 }
+
 
 def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_surface, loss_func_keep_dim):
   batch_len = len(batch['y'])
@@ -50,6 +54,22 @@ def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_su
 
     dataset = text_classification.TextClassificationDataset.from_raw_data(
       raw_data, data.vocab, attack_surface=attack_surface, perturbation=OPTS.perturbation)
+
+    return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(raw_data)))), device)
+
+
+def hotflip_aug(attack, batch, data, victim_model, device):
+  batch_len = len(batch['y'])
+  with torch.no_grad():
+    raw_data = []
+    for i in range(batch_len):
+      words = [data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
+               if int(word_id[0]) > 0]
+      raw_data.append((' '.join(words), int(batch['y'][i][0])))
+      ans = attack.gen_adv(victim_model, words, int(batch['y'][i][0]), 1, victim_model.get_embed)[0]
+      raw_data.append((' '.join(ans), int(batch['y'][i][0])))
+
+    dataset = text_classification.TextClassificationDataset.from_raw_data(raw_data, data.vocab)
 
     return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(raw_data)))), device)
 
@@ -100,6 +120,12 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   cert_schedule = torch.tensor(np.linspace(initial_cert_frac, cert_frac, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
   eps_schedule = torch.tensor(np.linspace(initial_cert_eps, cert_eps, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
   aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
+  if OPTS.adv_perturbation is not None:
+    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation))
+    victim_model = ModelWrapper(model, train_data.vocab, device)
+  else:
+    attack = None
+    victim_model = None
   for t in range(num_epochs):
     model.train()
     if t < non_cert_train_epochs:
@@ -128,6 +154,11 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
         batch = data_util.dict_batch_to_device(batch, device)
         if OPTS.aug_perturbation is not None:
           batch = exhaustive_aug(aug_deltas, batch, batch_size, train_data, model, device, attack_surface, loss_func_keep_dim)
+        elif OPTS.adv_perturbation is not None:
+          model.eval()
+          optimizer.zero_grad()
+          batch = hotflip_aug(attack, batch, data, victim_model, device)
+          model.train()
 
         optimizer.zero_grad()
         if cur_cert_frac > 0.0:
@@ -242,12 +273,22 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
   }
   data = dataset.get_loader(32)
   aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
+  if OPTS.adv_perturbation is not None:
+    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation))
+    victim_model = ModelWrapper(model, dataset.vocab, device)
+  else:
+    attack = None
+    victim_model = None
   with torch.no_grad():
     for batch in tqdm(data):
       batch = data_util.dict_batch_to_device(batch, device)
+      # attack_surface is used to exam whether the caller is train()
       if OPTS.aug_perturbation is not None and attack_surface is not None:
         batch = exhaustive_aug(aug_deltas, batch, batch_size, dataset, model, device, attack_surface,
                                loss_func_keep_dim)
+      # attack_surface is used to exam whether the caller is train()
+      elif OPTS.adv_perturbation is not None and attack_surface is not None:
+        batch = hotflip_aug(attack, batch, data, victim_model, device)
       out = model.forward(batch, cert_eps=1.0)
       results['loss'] += loss_func(out.val, batch['y']).item()
       num_correct, num_cert_correct = task_class.num_correct(out, batch['y'])
@@ -302,7 +343,7 @@ def parse_args():
   parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
   parser.add_argument('--baseline', action='store_true', help="Do baseline robust training, i.e., delta=infty")
   # Adversary
-  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic'],
+  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic', 'hotflip'],
                       default=None, help='Which adversary to test on')
   parser.add_argument('--adv-num-epochs', type=int, default=10)
   parser.add_argument('--adv-num-tries', type=int, default=2)
@@ -310,8 +351,12 @@ def parse_args():
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
   parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
-  parser.add_argument('--perturbation', type=str, default=None)
-  parser.add_argument('--aug-perturbation', type=str, default=None)
+  parser.add_argument('--perturbation', type=str, default=None,
+                      help='Perturbation for IBP training & exhaustive testing')
+  parser.add_argument('--aug-perturbation', type=str, default=None, help='Perturbation for exhaustive training')
+  parser.add_argument('--adv-perturbation', type=str, default=None,
+                      help='Perturbation for hotflip adv training & hotflip adv testing')
+  parser.add_argument('--adv-beam', type=int, default=5, help='HotFlip attack (test) beam size')
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
@@ -408,18 +453,22 @@ def main():
           weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs, non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only, attack_surface=attack_surface)
     print('Training finished.')
   print('Testing model.')
+  adversary = None
+  if OPTS.adversary == 'exhaustive':
+    adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
+  elif OPTS.adversary == 'greedy':
+    adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
+                                           num_tries=OPTS.adv_num_tries)
+  elif OPTS.adversary == 'genetic':
+    adversary = task_class.GeneticAdversary(attack_surface, num_iters=OPTS.adv_num_epochs,
+                                            pop_size=OPTS.adv_pop_size)
+  elif OPTS.adversary == "hotflip":
+    victim_model = ModelWrapper(model, train_data.vocab, device)
+    adversary = task_class.HotFlipAdversary(victim_model, OPTS.adv_perturbation)
+
   if not OPTS.adv_only:
     train_results = test(task_class, model, 'Train', train_data, device,
                          batch_size=OPTS.batch_size)
-    adversary = None
-    if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
-    elif OPTS.adversary == 'greedy':
-      adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
-                                             num_tries=OPTS.adv_num_tries)
-    elif OPTS.adversary == 'genetic':
-      adversary = task_class.GeneticAdversary(attack_surface, num_iters=OPTS.adv_num_epochs,
-                                              pop_size=OPTS.adv_pop_size)
     dev_results = test(task_class, model, 'Dev', dev_data, device,
                        adversary=adversary, batch_size=OPTS.batch_size)
     results = {
@@ -429,15 +478,6 @@ def main():
     with open(os.path.join(OPTS.out_dir, 'test_results.json'), 'w') as f:
       json.dump(results, f)
   else:
-    adversary = None
-    if OPTS.adversary == 'exhaustive':
-      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
-    elif OPTS.adversary == 'greedy':
-      adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
-                                             num_tries=OPTS.adv_num_tries)
-    elif OPTS.adversary == 'genetic':
-      adversary = task_class.GeneticAdversary(attack_surface, num_iters=OPTS.adv_num_epochs,
-                                              pop_size=OPTS.adv_pop_size)
     test(task_class, model, 'Dev', dev_data, device, adversary=adversary, batch_size=OPTS.batch_size)
 
 if __name__ == '__main__':
