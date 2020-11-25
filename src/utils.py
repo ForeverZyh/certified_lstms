@@ -5,6 +5,9 @@ import heapq
 import copy
 from multiprocessing import Pool, Process, SimpleQueue, Pipe
 
+import dgl
+import networkx as nx
+
 inf = 1e10
 
 
@@ -153,7 +156,7 @@ class Beam:
                 ret = False
 
         heapq.heappush(self.queue, (score, data))  # add (score, data)
-        self.in_queue[data] = score # update in self.in_queue
+        self.in_queue[data] = score  # update in self.in_queue
         return ret
 
     def extend(self, others):
@@ -239,3 +242,72 @@ def compute_adjacent_keys(dict_map):
             ids.append(dict_map[x])
         adjacent_keys[dict_map[tmp[0]]].extend(ids)
     return adjacent_keys
+
+
+def cons_tree(x, phi, f, old_tree, vocab):
+    PAD_WORD = -1
+    g = nx.DiGraph()
+    old_xid = old_tree.ndata['x'].tolist()
+    cnt = 0
+    map_old_xid_x_id = [None] * len(old_xid)
+    for i, id in enumerate(old_xid):
+        if id != PAD_WORD:  # PAD_WORD
+            map_old_xid_x_id[i] = cnt
+            cnt += 1
+
+    assert cnt == len(x)  # sanity check
+
+    def _rec_build(old_u):
+        in_nodes = old_tree.in_edges(old_u)[0]
+        sub_trees = []
+        for node in in_nodes:
+            node = int(node)
+            if old_tree.in_degrees(node) == 0:
+                # leaf node
+                cid = g.number_of_nodes()
+                id = map_old_xid_x_id[node]
+                if phi[id] == 0:
+                    word = vocab.get(x[id], PAD_WORD)
+                elif phi[id] == 1:
+                    continue
+                elif phi[id] == 2:
+                    left = cid + 1
+                    right = cid + 2
+                    word = vocab.get(x[id], PAD_WORD)
+                    g.add_node(cid, x=PAD_WORD, y=int(old_tree.ndata['y'][node]),
+                               mask=0)  # we duplicate the y label
+                    g.add_node(left, x=word, y=int(old_tree.ndata['y'][node]), mask=1)
+                    g.add_node(right, x=word, y=int(old_tree.ndata['y'][node]), mask=1)
+                    g.add_edge(left, cid)
+                    g.add_edge(right, cid)
+                    sub_trees.append(cid)
+                    continue
+                elif phi[id] == 3:
+                    word = vocab.get(f[id], PAD_WORD)
+                else:
+                    raise NotImplementedError
+
+                g.add_node(cid, x=word, y=int(old_tree.ndata['y'][node]), mask=1)
+                sub_trees.append(cid)
+            else:
+                sub_tree = _rec_build(node)
+                if sub_tree is not None:
+                    sub_trees.append(sub_tree)
+
+        if len(sub_trees) == 0:
+            return None
+        elif len(sub_trees) == 1:
+            return sub_trees[0]
+        else:
+            assert len(sub_trees) == 2  # sanity check
+            nid = g.number_of_nodes()
+            g.add_node(nid, x=PAD_WORD, y=int(old_tree.ndata['y'][old_u]), mask=0)
+            for cid in sub_trees:
+                g.add_edge(cid, nid)
+            return nid
+
+    # add root
+    root = _rec_build(0)
+    g.add_node(root, x=PAD_WORD, y=int(old_tree.ndata['y'][0]), mask=0)
+    assert old_tree.out_degrees(0) == 0  # sanity check
+    return dgl.from_networkx(g, node_attrs=['x', 'y', 'mask'])

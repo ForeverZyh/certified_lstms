@@ -41,3 +41,31 @@ class ModelWrapper:
                 pointer += 1
 
         return ret
+
+
+class TreeModelWrapper:
+    def __init__(self, model, vocab, device, from_raw_data):
+        self.model = model
+        self.vocab = vocab
+        self.device = device
+        self.from_raw_data = from_raw_data
+
+    def get_embed(self, x, ret_len=None):
+        """
+        :param x: a list of tokens
+        :param ret_len: the return length, if None, the length is equal to len(x). if len(x) < ret_len, we add padding
+        :return: np array with shape (ret_len, word_vec_size)
+        """
+        x = torch.LongTensor([self.vocab.get_index(w) for w in x]).to(self.device)
+        return self.model.get_embed(x, ret_len)
+
+    def get_grad(self, tree, attack_Ins):
+        """
+        :param tree: a target tree
+        :param attack_Ins: if attack the Ins transformation, if True, we will return additional grads (x_iou, h, c)
+        :return: np array with shape (len, word_vec_size)
+        """
+        dataset = self.from_raw_data([tree], self.vocab)
+        data = dataset.get_loader(1)
+        batch = data_util.dict_batch_to_device(next(iter(data)), self.device)
+        return self.model.get_grad(batch, attack_Ins)

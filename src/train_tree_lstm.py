@@ -5,6 +5,7 @@ import time
 import os
 import json
 import glob
+from functools import partial
 
 from tqdm import tqdm
 import numpy as np
@@ -21,16 +22,18 @@ import dgl
 from dgl.data.tree import SSTDataset
 
 from tree_lstm import TreeLSTM, TreeLSTMDP
-from text_classification import TextClassificationTreeDataset, num_correct_multi_classes, ExhaustiveAdversary
+from text_classification import TextClassificationTreeDataset, num_correct_multi_classes, ExhaustiveAdversary, \
+    HotFlipAdversary
 import vocabulary
 import data_util
 import attacks
+from victim_model_wrapper import TreeModelWrapper
 
 SSTBatch = collections.namedtuple('SSTBatch', ['graph', 'mask', 'wordid', 'label'])
 num_classes = 5
 
 
-def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None, PAD_WORD =None):
+def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None, PAD_WORD=None):
     data = dataset.get_loader(args.batch_size)
     model.eval()
     loss_func = CrossEntropyLoss()
@@ -255,10 +258,6 @@ def main_test(args):
     testset = TextClassificationTreeDataset.from_raw_data(testset, vocab, tree_data_vocab=trainset_vocab,
                                                           PAD_WORD=PAD_WORD, attack_surface=attack_surface,
                                                           perturbation=args.perturbation)
-    if args.adversary == 'exhaustive':
-        adversary = ExhaustiveAdversary(attack_surface, args.perturbation)
-    else:
-        adversary = None
     model = TreeLSTMDP(device,
                        len(testset.vocab),
                        word_mat.shape[1],
@@ -280,7 +279,16 @@ def main_test(args):
             print('Finished loading model.')
         except Exception as ex:
             print("Couldn't load model, starting anew: {}".format(ex))
-    test(args, model, testset, device, "Test", adversary=adversary, trainset_vocab=trainset_vocab, PAD_WORD =PAD_WORD)
+    if args.adversary == 'exhaustive':
+        adversary = ExhaustiveAdversary(attack_surface, args.perturbation)
+    elif args.adversary == 'hotflip':
+        victim_model = TreeModelWrapper(model, vocab, device, partial(TextClassificationTreeDataset.from_raw_data,
+                                                                      tree_data_vocab=trainset_vocab,
+                                                                      PAD_WORD=PAD_WORD))
+        adversary = HotFlipAdversary(victim_model, args.adv_perturbation, True)
+    else:
+        adversary = None
+    test(args, model, testset, device, "Test", adversary=adversary, trainset_vocab=trainset_vocab, PAD_WORD=PAD_WORD)
 
 
 def main(args):
@@ -344,10 +352,15 @@ if __name__ == '__main__':
     parser.add_argument('--load-ckpt', type=int, default=None, help='Which checkpoint to load')
 
     # Adversary
-    parser.add_argument('--adversary', '-a', choices=['exhaustive'], default=None, help='Which adversary to test on')
+    parser.add_argument('--adversary', '-a', choices=['exhaustive', 'hotflip'], default=None,
+                        help='Which adversary to test on')
     parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
-    parser.add_argument('--perturbation', type=str, default=None)
-    parser.add_argument('--aug-perturbation', type=str, default=None)
+    parser.add_argument('--perturbation', type=str, default=None,
+                        help='Perturbation for IBP training & exhaustive testing')
+    parser.add_argument('--aug-perturbation', type=str, default=None, help='Perturbation for exhaustive training')
+    parser.add_argument('--adv-perturbation', type=str, default=None,
+                        help='Perturbation for hotflip adv training & hotflip adv testing')
+    parser.add_argument('--adv-beam', type=int, default=5, help='HotFlip attack (test) beam size')
     parser.add_argument('--full-train-epochs', type=int, default=0,
                         help='If specified use full cert_frac and cert_eps for this many epochs at the end')
     parser.add_argument('--non-cert-train-epochs', type=int, default=0,

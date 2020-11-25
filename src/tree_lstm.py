@@ -9,6 +9,7 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import CrossEntropyLoss
 import dgl
 
 import ibp
@@ -277,6 +278,10 @@ class TreeLSTMDP(nn.Module):
         # TODO: to implement more discrete perturbation space
         self.device = device
         self.perturbation = perturbation
+        self.adv_attack = False
+        self.out_x_vecs = None
+        self.adv_attack_Ins = False
+        self.out_ioux_c = [None, None]
         self.deltas = Perturbation.str2deltas(perturbation)
         self.deltas_p1 = [delta + 1 for delta in self.deltas]
         self.x_size = x_size
@@ -334,6 +339,81 @@ class TreeLSTMDP(nn.Module):
             else:
                 return logits
 
+    def get_embed(self, x, ret_len=None):
+        """
+        :param x: tensor of word vector indices
+        :param ret_len: the return length, if None, the length is equal to len(x). if len(x) < ret_len, we add padding
+        :return: np array with shape (ret_len, word_vec_size)
+        """
+        if ret_len is None:
+            ret_len = len(x)
+        ret = np.zeros((ret_len, self.x_size))
+        with th.no_grad():
+            ret[:len(x)] = self.embedding(x.unsqueeze(0))[0].cpu().numpy()
+        return ret
+
+    def get_grad(self, batch, attack_Ins):
+        """
+        :param batch: a batch of things including a tensor of word vector indices (B, len)
+        :param attack_Ins: if attack the Ins transformation, if True, we will return other two grads instead (x_iou, c)
+        :return: if attack_Ins is False, return np array with shape (len, word_vec_size),
+            Otherwise, return np arrays with shape (len, h_size * 3), (len, h_size)
+        """
+        self.adv_attack = True
+        if attack_Ins:
+            self.adv_attack_Ins = True
+
+        g = batch['trees']
+        n = g.number_of_nodes()
+        leaf_ids = [i for i in range(g.number_of_nodes()) if g.in_degrees(i) == 0]
+        h = th.zeros((n, self.h_size)).to(self.device)
+        c = th.zeros((n, self.h_size)).to(self.device)
+        logits = self.forward(batch, g, h, c, compute_bounds=False)
+        loss = CrossEntropyLoss()(logits, batch['y'])
+        loss.backward()
+
+        self.adv_attack = False
+        if attack_Ins:
+            self.adv_attack_Ins = False
+            return self.out_ioux_c[0].grad[leaf_ids].cpu().numpy(), self.out_ioux_c[1].grad[leaf_ids].cpu().numpy()
+
+        return self.out_x_vecs.grad[leaf_ids].cpu().numpy()
+
+    def cal_delta_Ins(self, embedding):
+        """
+        calculate the delta between the node after applying Ins transformation and the previous node.
+        :param embedding: the embedding of one token
+        :return: delta of iou_x and c, in the shapes of (3 * h_size), (h_size) respectively
+        """
+        with th.no_grad():
+            z = th.Tensor(embedding).to(self.device)
+
+            # previous iou_x
+            if not self.no_wordvec_layer:
+                z = self.linear_input(z)
+                z = ibp.activation(F.relu, z)
+            pre_iou_x = self.cell.W_iou(z)
+
+            # previous c = 0
+
+            # new iou_x and c
+            d = self.h_size
+            iou_x = pre_iou_x + self.cell.b_iou  # (1, d * 3)
+            i, o, u = iou_x[:, :d], iou_x[:, d: d * 2], iou_x[:, d * 2:]
+            i = th.sigmoid(i)
+            o = th.sigmoid(o)
+            u = th.tanh(u)
+            c = i * u
+            h = o * th.tanh(c)
+            h_cat = h.repeat(1, 2)  # (1, d * 2)
+            f_cat = th.sigmoid(self.cell.U_f(h_cat))
+            new_c = (f_cat[:, :d] + f_cat[:, d:]) * c
+            new_iou_x = self.cell.U_iou(h_cat)
+
+            delta_iou_x = (new_iou_x - pre_iou_x).cpu().numpy()
+            delta_c = new_c.cpu().numpy()
+            return delta_iou_x, delta_c
+
     def forward(self, batch, g, h, c, compute_bounds=True, cert_eps=1.0):
         """Compute tree-lstm prediction given a batch.
         Parameters
@@ -359,6 +439,9 @@ class TreeLSTMDP(nn.Module):
         mask = batch['mask'].unsqueeze(-1)
 
         x_vecs = self.embedding(x)  # n, d
+        if self.adv_attack:
+            x_vecs.retain_grad()
+            self.out_x_vecs = x_vecs
         z_interval = None
         unk_mask = None
         if not self.no_wordvec_layer:
@@ -379,9 +462,19 @@ class TreeLSTMDP(nn.Module):
             z = x_vecs
 
         if z_interval is None:  # bypass the ibp
-            g.ndata['iou'] = self.cell.W_iou(self.dropout(z)) * mask.float()
-            g.ndata['h'] = h
-            g.ndata['c'] = c
+            if self.adv_attack_Ins:
+                iou_x = self.cell.W_iou(self.dropout(z)) * mask.float()
+                iou_x.retain_grad()
+                self.out_ioux_c[0] = iou_x
+                c.requires_grad = True
+                self.out_ioux_c[1] = c
+                g.ndata['iou'] = iou_x
+                g.ndata['h'] = h
+                g.ndata['c'] = c
+            else:
+                g.ndata['iou'] = self.cell.W_iou(self.dropout(z)) * mask.float()
+                g.ndata['h'] = h
+                g.ndata['c'] = c
             # propagate
             dgl.prop_nodes_topo(g, self.cell.message_func, self.cell.reduce_func,
                                 apply_node_func=self.cell.apply_node_func)

@@ -23,6 +23,8 @@ import ibp
 import vocabulary
 from perturbation import Perturbation, Sub, Ins, Del, UNK
 from DSL.general_HotFlip import GeneralHotFlipAttack
+from DSL.specialized_HotFlip_trees import HotFlipAttackTree
+from utils import cons_tree
 
 LOSS_FUNC = nn.BCEWithLogitsLoss()
 LOSS_FUNC_KEEP_DIM = nn.BCEWithLogitsLoss(reduction="none")
@@ -530,11 +532,14 @@ class HotFlipAdversary(Adversary):
     Only practical for short sentences.
     """
 
-    def __init__(self, victim_model, perturbation):
+    def __init__(self, victim_model, perturbation, tree_attack=False):
         super(HotFlipAdversary, self).__init__(None)
         self.victim_model = victim_model
         from DSL.transformation import Ins, Del, Sub
-        self.attack = GeneralHotFlipAttack(eval(perturbation))
+        if tree_attack:
+            self.attack = HotFlipAttackTree(eval(perturbation))
+        else:
+            self.attack = GeneralHotFlipAttack(eval(perturbation))
 
     def run(self, model, dataset, device, opts=None):
         is_correct = []
@@ -564,8 +569,51 @@ class HotFlipAdversary(Adversary):
                 adv_exs.append(cur_adv_exs)
                 is_correct_single = False
 
-            # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            print('HotFlipAdversary: "%s" -> %d options' % (x, is_correct_single))
+            is_correct.append(is_correct_single)
+            if is_correct_single:
+                adv_exs.append([])
+
+        return is_correct, adv_exs
+
+    def run_tree(self, model, dataset, device, trainset_vocab, PAD_WORD, opts=None):
+        is_correct = []
+        adv_exs = []
+        tree_data_vocab_key_list = list(trainset_vocab.keys())
+        for example in tqdm(dataset.examples):
+            # First query the example itself
+            g = example["trees"][0]
+            x = " ".join(example["rawx"])
+            root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
+            target = g.ndata['y'].long()[root_ids].item()
+            orig_pred = model.query(example["trees"], dataset.vocab, device, trainset_vocab, PAD_WORD,
+                                    return_bounds=False)
+            orig_pred = orig_pred[0]
+
+            def is_logits_correct(x):
+                return all(x[i].item() < x[target].item() for i in range(x.shape[0]) if i != target)
+
+            if not is_logits_correct(orig_pred):
+                print('ORIGINAL PREDICTION WAS WRONG')
+                is_correct.append(0)
+                adv_exs.append(x)
+                continue
+
+            text = example["rawx"]
+
+            is_correct_single = True
+            ans = self.attack.gen_adv(self.victim_model, g, text, opts.adv_beam, trainset_vocab)
+            all_raw = [
+                " ".join([tree_data_vocab_key_list[x.item()] for x in g.ndata["x"] if x.item() != PAD_WORD])
+                for g in ans]
+            preds = model.query(ans, dataset.vocab, device, trainset_vocab, PAD_WORD)
+            cur_adv_exs = [all_raw[i] for i, p in enumerate(preds) if not is_logits_correct(p)]
+            if len(cur_adv_exs) > 0:
+                print(cur_adv_exs)
+                adv_exs.append(cur_adv_exs)
+                is_correct_single = False
+
+            print('HotFlipAdversary: "%s" -> %d options' % (x, is_correct_single))
             is_correct.append(is_correct_single)
             if is_correct_single:
                 adv_exs.append([])
@@ -752,74 +800,6 @@ class ExhaustiveAdversary(Adversary):
             yield X
 
     @staticmethod
-    def cons_tree(x, phi, f, old_tree, vocab):
-        PAD_WORD = -1
-        g = nx.DiGraph()
-        old_xid = old_tree.ndata['x'].tolist()
-        cnt = 0
-        map_old_xid_x_id = [None] * len(old_xid)
-        for i, id in enumerate(old_xid):
-            if id != PAD_WORD:  # PAD_WORD
-                map_old_xid_x_id[i] = cnt
-                cnt += 1
-
-        assert cnt == len(x)  # sanity check
-
-        def _rec_build(old_u):
-            in_nodes = old_tree.in_edges(old_u)[0]
-            sub_trees = []
-            for node in in_nodes:
-                node = int(node)
-                if old_tree.in_degrees(node) == 0:
-                    # leaf node
-                    cid = g.number_of_nodes()
-                    id = map_old_xid_x_id[node]
-                    if phi[id] == 0:
-                        word = vocab.get(x[id], PAD_WORD)
-                    elif phi[id] == 1:
-                        continue
-                    elif phi[id] == 2:
-                        left = cid + 1
-                        right = cid + 2
-                        word = vocab.get(x[id], PAD_WORD)
-                        g.add_node(cid, x=PAD_WORD, y=0, mask=0)  # we do not care about the y label
-                        g.add_node(left, x=word, y=0, mask=1)  # we do not care about the y label
-                        g.add_node(right, x=word, y=0, mask=1)  # we do not care about the y label
-                        g.add_edge(left, cid)
-                        g.add_edge(right, cid)
-                        sub_trees.append(cid)
-                        continue
-                    elif phi[id] == 3:
-                        word = vocab.get(f[id], PAD_WORD)
-                    else:
-                        raise NotImplementedError
-
-                    g.add_node(cid, x=word, y=0, mask=1)  # we do not care about the y label
-                    sub_trees.append(cid)
-                else:
-                    sub_tree = _rec_build(node)
-                    if sub_tree is not None:
-                        sub_trees.append(sub_tree)
-
-            if len(sub_trees) == 0:
-                return None
-            elif len(sub_trees) == 1:
-                return sub_trees[0]
-            else:
-                assert len(sub_trees) == 2  # sanity check
-                nid = g.number_of_nodes()
-                g.add_node(nid, x=PAD_WORD, y=0, mask=0)  # we do not care about the y label
-                for cid in sub_trees:
-                    g.add_edge(cid, nid)
-                return nid
-
-        # add root
-        root = _rec_build(0)
-        g.add_node(root, x=PAD_WORD, y=int(old_tree.ndata['y'][0]), mask=0)
-        assert old_tree.out_degrees(0) == 0  # sanity check
-        return dgl.from_networkx(g, node_attrs=['x', 'y', 'mask'])
-
-    @staticmethod
     def DelDupSubTree(a, b, c, x, tree, vocab, choices, batch_size=64, del_set={"a", "and", "the", "of", "to"}):
         end_pos = len(x)
 
@@ -854,7 +834,7 @@ class ExhaustiveAdversary(Adversary):
                                     for del_pos in del_poss:
                                         phi[del_pos] = 1
 
-                                    X.append(ExhaustiveAdversary.cons_tree(x, phi, f, tree, vocab))
+                                    X.append(cons_tree(x, phi, f, tree, vocab))
                                     if len(X) == batch_size:
                                         yield X
                                         X = []

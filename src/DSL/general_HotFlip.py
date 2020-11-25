@@ -40,9 +40,9 @@ class GeneralHotFlipAttack:
         :param top_n: maximum number of adversarial candidates given the perturbation space.
         :param get_embed: get_embed(x, ret_len) takes a list of tokens as inputs and output the embedding matrix with
         shape (ret_len, dim).
-        :param return_score: whether return the score as a list [(sen, score)], default False, i.e., return [sen]
         if ret_len > len(x), then padding is needed.
         if ret_len < len(x), then truncating is needed. (Currently, we do not need truncate)
+        :param return_score: whether return the score as a list [(sen, score)], default False, i.e., return [sen]
         :return: a list of adversarial examples
         """
 
