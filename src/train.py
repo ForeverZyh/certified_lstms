@@ -60,18 +60,17 @@ def exhaustive_aug(aug_deltas, batch, batch_size, data, model, device, attack_su
 
 def hotflip_aug(attack, batch, data, victim_model, device):
   batch_len = len(batch['y'])
-  with torch.no_grad():
-    raw_data = []
-    for i in range(batch_len):
-      words = [data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
-               if int(word_id[0]) > 0]
-      raw_data.append((' '.join(words), int(batch['y'][i][0])))
-      ans = attack.gen_adv(victim_model, words, int(batch['y'][i][0]), 1, victim_model.get_embed)[0]
-      raw_data.append((' '.join(ans), int(batch['y'][i][0])))
+  raw_data = []
+  for i in range(batch_len):
+    words = [data.vocab.get_word(int(word_id[0])) for word_id in batch['x'].val[i]
+            if int(word_id[0]) > 0]
+    raw_data.append((' '.join(words), int(batch['y'][i][0])))
+    ans = attack.gen_adv(victim_model, words, int(batch['y'][i][0]), 1, victim_model.get_embed)[0]
+    raw_data.append((' '.join(ans), int(batch['y'][i][0])))
 
-    dataset = text_classification.TextClassificationDataset.from_raw_data(raw_data, data.vocab)
+  dataset = text_classification.TextClassificationDataset.from_raw_data(raw_data, data.vocab)
 
-    return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(raw_data)))), device)
+  return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(raw_data)))), device)
 
 
 def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
@@ -157,7 +156,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
         elif OPTS.adv_perturbation is not None:
           model.eval()
           optimizer.zero_grad()
-          batch = hotflip_aug(attack, batch, data, victim_model, device)
+          batch = hotflip_aug(attack, batch, train_data, victim_model, device)
           model.train()
 
         optimizer.zero_grad()
@@ -288,7 +287,8 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
                                loss_func_keep_dim)
       # attack_surface is used to exam whether the caller is train()
       elif OPTS.adv_perturbation is not None and attack_surface is not None:
-        batch = hotflip_aug(attack, batch, data, victim_model, device)
+        with torch.enable_grad():
+          batch = hotflip_aug(attack, batch, dataset, victim_model, device)
       out = model.forward(batch, cert_eps=1.0)
       results['loss'] += loss_func(out.val, batch['y']).item()
       num_correct, num_cert_correct = task_class.num_correct(out, batch['y'])

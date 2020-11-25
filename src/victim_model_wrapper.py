@@ -27,9 +27,11 @@ class ModelWrapper:
         :return: np array with shape (len, word_vec_size)
         """
         dataset = text.from_raw_data([(" ".join(x), y)], self.vocab)
+        if len(dataset.examples) == 0: # some UNK will be removed, and if none of the word remains...
+            return np.zeros((len(x), self.model.word_vec_size))
         data = dataset.get_loader(1)
         batch = data_util.dict_batch_to_device(next(iter(data)), self.device)
-        gradients = self.model.get_grad(batch, torch.Tensor([[y]]))[0]
+        gradients = self.model.get_grad(batch, torch.Tensor([[y]]).to(self.device))[0]
         # some of the UNK have been omitted, we need to add them back as zero gradients
         if len(gradients) == len(x):
             return gradients

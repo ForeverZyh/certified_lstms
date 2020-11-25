@@ -62,8 +62,9 @@ class GeneralHotFlipAttack:
                 old_candidates = candidates.check_balance()
                 for (candidate, _) in old_candidates:
                     if candidate not in perturbed_set:
-                        candidate.try_all_pos(possible_pos, tran, model.get_grad(candidate.x, y), get_embed,
-                                              candidates)
+                        if len(candidate.x) > 0:
+                            candidate.try_all_pos(possible_pos, tran, model.get_grad(candidate.x, y), get_embed,
+                                    candidates)
                         perturbed_set.add(candidate)
 
         ret = candidates.check_balance()
