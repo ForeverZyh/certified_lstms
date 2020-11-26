@@ -105,6 +105,10 @@ class ProcessedDataset(Dataset):
     batch_sampler = PooledBatchSampler(self, batch_size, sort_key=self.example_len)
     return DataLoader(self, pin_memory=True, collate_fn=self.collate_examples, batch_sampler=batch_sampler)
 
+  def get_loader_adv(self, batch_size):
+    batch_sampler = PooledBatchSampler(self, batch_size, sort_key=self.example_len)
+    return DataLoader(self, pin_memory=True, collate_fn=self.collate_examples_adv, batch_sampler=batch_sampler)
+
 
 def multi_dim_padded_cat(tensors, dim, padding_value=0):
   """

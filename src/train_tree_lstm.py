@@ -28,13 +28,33 @@ import vocabulary
 import data_util
 import attacks
 from victim_model_wrapper import TreeModelWrapper
+from DSL.transformation import Ins, Del, Sub
+from DSL.specialized_HotFlip_trees import HotFlipAttackTree
 
 SSTBatch = collections.namedtuple('SSTBatch', ['graph', 'mask', 'wordid', 'label'])
 num_classes = 5
 
 
-def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None, PAD_WORD=None):
-    data = dataset.get_loader(args.batch_size)
+def hotflip_aug(attack, examples, data, victim_model, device, trainset_vocab):
+    trees = []
+    for i, ex in enumerate(examples):
+        g = ex['trees'][0]
+        text = ex['rawx']
+        trees.append(g)
+        ans = attack.gen_adv(victim_model, g, text, 1, trainset_vocab)[0]
+        trees.append(ans)
+
+    dataset = victim_model.from_raw_data(trees, data.vocab)
+
+    return data_util.dict_batch_to_device(next(iter(dataset.get_loader(len(trees)))), device)
+
+
+def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None, PAD_WORD=None, victim_model=None,
+         attack=None):
+    if args.adv_perturbation is None or victim_model is None:  # make sure the adv testing does not affect clean acc
+        data = dataset.get_loader(args.batch_size)
+    else:
+        data = dataset.get_loader_adv(args.batch_size)
     model.eval()
     loss_func = CrossEntropyLoss()
     results = {
@@ -48,7 +68,11 @@ def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None
     }
     with th.no_grad():
         for batch in tqdm(data):
-            batch = data_util.dict_batch_to_device(batch, device)
+            # make sure the adv testing does not affect clean acc
+            if args.adv_perturbation is not None and victim_model is not None:
+                batch = hotflip_aug(attack, batch, dataset, victim_model, device, trainset_vocab)
+            else:
+                batch = data_util.dict_batch_to_device(batch, device)
             g = batch['trees']
             root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
             n = g.number_of_nodes()
@@ -75,8 +99,12 @@ def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None
     return results
 
 
-def train(args, model, trainset, devset, device, trainset_vocab):
-    train_loader = trainset.get_loader(args.batch_size)
+def train(args, model, trainset, devset, device, trainset_vocab, victim_model=None, attack=None):
+    if args.adv_perturbation is None:
+        train_loader = trainset.get_loader(args.batch_size)
+    else:
+        train_loader = trainset.get_loader_adv(args.batch_size)
+
     params_ex_emb = [x for x in list(model.parameters()) if x.requires_grad and x.size(0) != len(trainset_vocab) + 1]
     params_emb = list(model.embedding.parameters())
 
@@ -145,7 +173,14 @@ def train(args, model, trainset, devset, device, trainset_vocab):
         }
         with tqdm(train_loader) as batch_loop:
             for batch_idx, batch in enumerate(batch_loop):
-                batch = data_util.dict_batch_to_device(batch, device)
+                if args.adv_perturbation is not None:
+                    model.eval()
+                    optimizer.zero_grad()
+                    batch = hotflip_aug(attack, batch, trainset, victim_model, device, trainset_vocab)
+                    model.train()
+                else:
+                    batch = data_util.dict_batch_to_device(batch, device)
+
                 g = batch['trees']
                 target = batch['y'].long()
                 root_ids = [i for i in range(g.number_of_nodes()) if g.out_degrees(i) == 0]
@@ -200,7 +235,8 @@ def train(args, model, trainset, devset, device, trainset_vocab):
         print(acc_str)
         is_best = False
 
-        dev_results = test(args, model, devset, device, "Dev")
+        dev_results = test(args, model, devset, device, "Dev", trainset_vocab=trainset_vocab, victim_model=victim_model,
+                           attack=attack)
         epoch['dev'] = dev_results
         all_epoch_stats['acc']['dev']['clean'].append(dev_results['clean_acc'])
         all_epoch_stats['acc']['dev']['cert'].append(dev_results['cert_acc'])
@@ -327,7 +363,15 @@ def main(args):
                        pretrained_emb=word_mat, perturbation=args.perturbation,
                        no_wordvec_layer=args.no_wordvec_layer).to(device)
     print(model)
-    train(args, model, trainset, devset, device, trainset_vocab)
+    if args.adv_perturbation is not None:
+        victim_model = TreeModelWrapper(model, vocab, device, partial(TextClassificationTreeDataset.from_raw_data,
+                                                                      tree_data_vocab=trainset_vocab,
+                                                                      PAD_WORD=PAD_WORD))
+        attack = HotFlipAttackTree(eval(args.adv_perturbation))
+    else:
+        victim_model = None
+        attack = None
+    train(args, model, trainset, devset, device, trainset_vocab, victim_model=victim_model, attack=attack)
     test(args, model, testset, device, "Test")
 
 

@@ -657,7 +657,6 @@ class ExhaustiveAdversary(Adversary):
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
             choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
-            words = [w for w in words]
 
             is_correct_single = True
             for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
@@ -1379,6 +1378,10 @@ class TextClassificationTreeDataset(data_util.ProcessedDataset):
         choice_masks = data_util.multi_dim_padded_cat(choice_masks, 0).long()
         return {'x': ibp.DiscreteChoiceTensorWithUNK(x_vals, choice_mats, choice_masks, masks, unk_masks),
                 'trees': trees, 'mask': masks, 'y': trees.ndata['y']}
+
+    @staticmethod
+    def collate_examples_adv(examples):
+        return examples
 
 
 class ToyClassificationDataset(TextClassificationDataset):
