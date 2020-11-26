@@ -656,9 +656,8 @@ class ExhaustiveAdversary(Adversary):
 
             words = x.split()
             swaps = self.attack_surface.get_swaps(words)
-            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps) if
-                       w in dataset.vocab]
-            words = [w for w in words if w in dataset.vocab]
+            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
+            words = [w for w in words]
 
             is_correct_single = True
             for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
