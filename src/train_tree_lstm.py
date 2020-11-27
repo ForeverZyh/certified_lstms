@@ -70,7 +70,8 @@ def test(args, model, dataset, device, name, adversary=None, trainset_vocab=None
         for batch in tqdm(data):
             # make sure the adv testing does not affect clean acc
             if args.adv_perturbation is not None and victim_model is not None:
-                batch = hotflip_aug(attack, batch, dataset, victim_model, device, trainset_vocab)
+                with th.enable_grad():
+                    batch = hotflip_aug(attack, batch, dataset, victim_model, device, trainset_vocab)
             else:
                 batch = data_util.dict_batch_to_device(batch, device)
             g = batch['trees']
