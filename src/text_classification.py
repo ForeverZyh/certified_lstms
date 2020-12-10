@@ -578,7 +578,7 @@ class LSTMDPGeneralModel(AdversarialModel):
                 fc_in = [None] * B
                 for i in range(B):
                     assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
-                    for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item() + 1):
+                    for j in range(lengths_interval.lb[i].item() - 1, lengths_interval.ub[i].item()):
                         if fc_in[i] is None:
                             fc_in[i] = h_mat[i, j]
                         else:
