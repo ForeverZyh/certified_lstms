@@ -90,6 +90,7 @@ class Perturbation:
     Del_idx = 0
     Ins_idx = 1
     Sub_idx = 2
+
     def __init__(self, trans, ipt, vocab, attack_surface=None, stop_words=None):
         self.deltas = Perturbation.str2deltas(trans)
         trans = eval(trans)
@@ -110,6 +111,24 @@ class Perturbation:
                 self.has_ins = delta > 0
             else:
                 raise NotImplementedError
+
+    @staticmethod
+    def dumy_perturbation(perturb_str):
+        perturb = eval(perturb_str)
+        trans = []
+        deltas = []
+        for tran, delta in perturb:
+            deltas.append(delta)
+            # TODO: a better way would be decouple the s, t attribute from the concrete ipt.
+            if tran == Sub:
+                trans.append(Sub([], delta, []))
+            elif tran == Del:
+                trans.append(Del([], delta))
+            elif tran == Ins:
+                trans.append(Ins([], delta))
+            else:
+                raise NotImplementedError
+        return trans, deltas
 
     def get_output_for_baseline_final_state(self):
         ret = [[] for _ in range(len(self.ipt))]

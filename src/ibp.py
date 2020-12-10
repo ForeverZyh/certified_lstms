@@ -808,10 +808,9 @@ class LSTMDPGeneral(nn.Module):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.device = device
-        self.perturbation = perturbation
+        self.perturbation, self.deltas = perturbation
         self.i2h = Linear(input_size, 4 * hidden_size)
         self.h2h = Linear(hidden_size, 4 * hidden_size)
-        self.deltas = Perturbation.str2deltas(perturbation)
         self.deltas_p1 = [delta + 1 for delta in self.deltas]
         self.deltas_ranges = [range(x) for x in self.deltas_p1]
 
@@ -885,8 +884,7 @@ class LSTMDPGeneral(nn.Module):
         mask = mask.unsqueeze(-1)
         d = self.hidden_size
         D = len(self.deltas)
-        idxs = range(max_out_len)
-        x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
+        x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
         length_lb = [-1] * B
         length_ub = [-1] * B
 
@@ -908,7 +906,7 @@ class LSTMDPGeneral(nn.Module):
             # compute the input position for deltas
             in_pos = out_pos
             for delta, tran in zip(deltas, self.perturbation):
-                in_pos += tran.s - tran.t
+                in_pos += (tran.s - tran.t) * delta
             return in_pos
 
         # a feasible set of states (B, *self.deltas_p1)
@@ -920,8 +918,8 @@ class LSTMDPGeneral(nn.Module):
         state2id = {}
         for state_id, deltas in enumerate(product(*self.deltas_ranges)):
             state2id[deltas] = state_id
-        cur_states = [(h, c)] + [None] * (len_cur_states - 1)
-        for i in idxs:
+        cur_states = [(IntervalBoundedTensor.point(h), IntervalBoundedTensor.point(c))] + [None] * (len_cur_states - 1)
+        for i in range(max_out_len + 1):  # + 1 make sure the last state is added.
             # cur_states should read as pre_states here.
             for state_id, deltas in enumerate(product(*self.deltas_ranges)):
                 # compute the input position for deltas
@@ -930,13 +928,13 @@ class LSTMDPGeneral(nn.Module):
                 for tran_id, tran in enumerate(self.perturbation):
                     if deltas[tran_id] > 0 and tran.t == 0:
                         pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
-                        if feasible[(slice(None),) + pre_deltas].any().item():
-                            # the input position for pre_deltas
-                            in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
-                            if 0 <= in_pos < T and torch.any(trans_phi[tran_id][:, in_pos]):
-                                cur_states[state_id] = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
-                                feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas] | (
-                                        feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos])
+                        # the input position for pre_deltas
+                        in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
+                        if 0 <= in_pos < T and torch.any(
+                                feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos]):
+                            cur_states[state_id] = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
+                            feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas] | (
+                                    feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos])
 
             # update ans and h, c
             cur_states_ret = [[] for _ in range(len(cur_states[0]))]
@@ -954,12 +952,12 @@ class LSTMDPGeneral(nn.Module):
                 ans.append(cur_ans)
                 # calculate the possible length of each sentence, the length_lb and ub are not related to the NN
                 # parameters. In other words, it is ok to decouple them from the gradient descent process.
-                for s_id in range(T):
+                for s_id in range(B):
                     for deltas in product(*self.deltas_ranges):
                         in_pos = cal_in_pos(i - 1, deltas)
-                        if in_pos == length[s_id].item():
+                        if in_pos == length[s_id].item() - 1 and feasible[(s_id,) + deltas].item():
                             length_ub[s_id] = i
-                            if length_lb[s_id] != -1:
+                            if length_lb[s_id] == -1:
                                 length_lb[s_id] = i
 
             # calculate cur_states by DP
@@ -984,7 +982,8 @@ class LSTMDPGeneral(nn.Module):
                             in_pos = _in_pos - (tran.s - tran.t)
                             for j in range(tran.t):
                                 # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
-                                if 0 <= in_pos - j < T and torch.any(trans_phi[tran_id][:, in_pos - j]):
+                                if 0 <= in_pos - j < T and torch.any(
+                                        feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]):
                                     cur_h, cur_c = compute_state(h[pre_deltas], c[pre_deltas],
                                                                  trans_o[tran_id][:, in_pos - j, j, :], None)
                                     # cur_h, cur_c have the shape (B, h_size)
@@ -997,23 +996,27 @@ class LSTMDPGeneral(nn.Module):
                 if cur_state is not None:
                     cur_states.append(cur_state)
                 else:
+                    if len(cur_states) == 0:  # if the 0-state is invalid, then we are going to end the DP process.
+                        break
                     cur_states.append(cur_states[0])
 
             # if feasible is not updated, then the DP process is over.
+            # some may doubt that we need to break after considering tran.t == 0, but the longest perturbed sentences
+            # cannot take any such transformation.
             if not cur_feasible.any().item():
                 break
 
             feasible = cur_feasible
 
         ret = [[] for _ in range(len(ans[0]))]
-        for i in idxs:
+        for i in range(len(ans)):
             for j in range(len(ret)):
                 ret[j].append(ans[i][j])
 
-        assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0].shape[1])
+        assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
         return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long(), torch.Tensor(length_ub).long())]
 
-    def forward(self, x, s0, length, mask=None, analysis_mode=False, trans_output=None):
+    def forward(self, x, trans_output, s0, length, mask=None, analysis_mode=False):
         """Forward pass of LSTM
 
         Args:

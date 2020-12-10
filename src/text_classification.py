@@ -470,12 +470,15 @@ class LSTMDPGeneralModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         if no_wordvec_layer:
-            self.lstm = ibp.LSTMDPGeneral(word_vec_size, hidden_size, eval(perturbation), device)
+            self.lstm = ibp.LSTMDPGeneral(word_vec_size, hidden_size, Perturbation.dumy_perturbation(perturbation),
+                                          device)
         else:
             self.linear_input = ibp.Linear(word_vec_size, hidden_size)
-            self.lstm = ibp.LSTMDPGeneral(hidden_size, hidden_size, eval(perturbation), device)
+            self.lstm = ibp.LSTMDPGeneral(hidden_size, hidden_size, Perturbation.dumy_perturbation(perturbation),
+                                          device)
         self.dropout = ibp.Dropout(dropout)
         self.fc_output = ibp.Linear(hidden_size, 1)
+        self.fc_hidden = ibp.Linear(hidden_size, hidden_size)
 
     def get_embed(self, x, ret_len=None):
         """
@@ -534,42 +537,53 @@ class LSTMDPGeneralModel(AdversarialModel):
             z = x_vecs
 
         # compute z_interval
-        z_interval = None
+        trans_output = None
         if compute_bounds:
             z_interval = []
             for o in trans_o:
-                if not self.no_wordvec_layer:
-                    o = self.linear_input(o).to_interval_bounded(eps=cert_eps)
-                    z_interval.append(ibp.activation(F.relu, o))
+                if isinstance(o, ibp.DiscreteChoiceTensorTrans):
+                    o = self.embs(o)
+                    if not self.no_wordvec_layer:
+                        o = self.linear_input(o).to_interval_bounded(eps=cert_eps)
+                        z_interval.append(ibp.activation(F.relu, o))
+                    else:
+                        z_interval.append(o.to_interval_bounded(eps=cert_eps))
                 else:
-                    z_interval.append(o.to_interval_bounded(eps=cert_eps))
+                    z_interval.append(o)
+            trans_output = (z_interval, trans_phi)
 
         h0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         c0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         if analysis_mode:
-            h_mat, c_mat, lstm_analysis, lengths_interval = self.lstm(z, z_interval, (h0, c0), lengths, mask=mask,
+            h_mat, c_mat, lstm_analysis, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask,
                                                                       analysis_mode=True)  # B, n, h each
         else:
-            h_mat, c_mat, lengths_interval = self.lstm(z, z_interval, (h0, c0), lengths, mask=mask)  # B, n, h each
+            h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
 
-        # TODO: consider the length interval
         max_length = h_mat.shape[1]
         if self.pool == 'mean':
-            new_mask = torch.zeros(B, max_length).to(self.device)
-            for i in range(B):
-                new_mask[i, :lengths_interval.ub[i].item()] = 1
-            h_masked = h_mat * new_mask.unsqueeze(2)  # only need to mask the state sequence
-            fc_in = ibp.sum(h_masked / lengths_interval.float().view(-1, 1, 1), 1)  # B, h
+            if trans_output is None:
+                h_masked = h_mat * mask.unsqueeze(2)  # only need to mask the state sequence
+                fc_in = ibp.sum(h_masked / lengths.to(dtype=torch.float).view(-1, 1, 1), 1)  # B, h
+            else:
+                new_mask = torch.zeros(B, max_length).to(self.device)
+                for i in range(B):
+                    new_mask[i, :lengths_interval.ub[i].item()] = 1
+                h_masked = h_mat * new_mask.unsqueeze(2)  # only need to mask the state sequence
+                fc_in = ibp.sum(h_masked / lengths_interval.float().view(-1, 1, 1), 1)  # B, h
         elif self.pool == 'final':
-            fc_in = [None] * B
-            for i in range(B):
-                assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
-                for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item() + 1):
-                    if fc_in[i] is None:
-                        fc_in[i] = h_mat[i, j]
-                    else:
-                        fc_in[i] = fc_in[i].merge(h_mat[i, j])
-            fc_in = ibp.stack(fc_in, dim=0)
+            if trans_output is None:
+                fc_in = h_mat[:, -1, :]  # B, h
+            else:
+                fc_in = [None] * B
+                for i in range(B):
+                    assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
+                    for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item() + 1):
+                        if fc_in[i] is None:
+                            fc_in[i] = h_mat[i, j]
+                        else:
+                            fc_in[i] = fc_in[i].merge(h_mat[i, j])
+                fc_in = ibp.stack(fc_in, dim=0)
         else:
             raise NotImplementedError()
         fc_in = self.dropout(fc_in)
@@ -1142,11 +1156,13 @@ def load_datasets(device, opts):
     try:
         with open(os.path.join(opts.data_cache_dir, 'train_data.pkl'), 'rb') as infile:
             train_data = pickle.load(infile)
-            if not isinstance(train_data, data_class):
+            if not isinstance(train_data, data_class) and not (
+                    opts.model == "lstm-dp-general" and isinstance(train_data, TextClassificationDatasetGeneral)):
                 raise Exception("Cached dataset of wrong class: {}".format(type(train_data)))
         with open(os.path.join(opts.data_cache_dir, 'dev_data.pkl'), 'rb') as infile:
             dev_data = pickle.load(infile)
-            if not isinstance(dev_data, data_class):
+            if not isinstance(dev_data, data_class) and not (
+                    opts.model == "lstm-dp-general" and isinstance(dev_data, TextClassificationDatasetGeneral)):
                 raise Exception("Cached dataset of wrong class: {}".format(type(train_data)))
         with open(os.path.join(opts.data_cache_dir, 'word_mat.pkl'), 'rb') as infile:
             word_mat = pickle.load(infile)
@@ -1457,16 +1473,20 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
             perturb = Perturbation(perturbation, all_words, vocab, attack_surface=attack_surface)
             words = perturb.ipt
             for tran in perturb.trans:
-                choices = tran.gen_output_for_dp(words)
-                phi = [choice is not None for choice in choices]
-                trans_phi.append(torch.Tensor(phi).bool().unsqueeze(0))
+                choices = tran.gen_output_for_dp()
+                phi = []
                 o = [[[] for _ in range(tran.t)] for _ in choices]
                 for start_pos in range(len(choices)):
+                    phi.append(False)
                     for choice in choices[start_pos]:
-                        for j in range(tran.t):
-                            if choice[j] in vocab:
-                                o[start_pos][j].append(choice[j])
+                        # We give up this choice if any of the words are out of vocab
+                        # This can vary between different implementations
+                        if all(choice[j] in vocab for j in range(tran.t)):
+                            phi[-1] = True  # there is a valid choice
+                            for j in range(tran.t):
+                                o[start_pos][j].append(vocab.get_index(choice[j]))
 
+                trans_phi.append(torch.tensor(phi, dtype=torch.bool).unsqueeze(0))
                 trans_o_id.append(o)
                 # trans_o_id contains a list of o. o has length len(x) and the shape (tran.t, #choice).
 
@@ -1481,17 +1501,15 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
             for tran_id, tran in enumerate(perturb.trans):
                 choices_torch = []
                 choices_mask = []
-                for start_pos in range(words):
+                for start_pos in range(len(words)):
                     # choices_torch will be a list of tensors with shape (1, tran.t, C, 1)
-                    choices_torch.append(torch.tensor(
-                        [[vocab.get_index(c) for c in c_list] for c_list in trans_o_id[tran_id][start_pos]],
-                        dtype=torch.long).unsqueeze(0).unsqueeze(-1))
-                    choices_mask = (choices_torch[-1].squeeze(-1) != 0).long()  # (1, tran.t, C)
+                    choices_torch.append(
+                        torch.tensor(trans_o_id[tran_id][start_pos], dtype=torch.long).unsqueeze(0).unsqueeze(-1))
+                    choices_mask.append((choices_torch[-1].squeeze(-1) != 0).long())  # (1, tran.t, C)
                 choices_torch = data_util.multi_dim_padded_cat(choices_torch, dim=0).unsqueeze(
                     0)  # (1, T, tran.t, C, 1)
                 choices_mask = data_util.multi_dim_padded_cat(choices_mask, dim=0).unsqueeze(0)  # (1, T, tran.t, C)
-                trans_o.append(
-                    ibp.DiscreteChoiceTensorTrans(choices_torch, choices_mask, mask_torch))
+                trans_o.append(ibp.DiscreteChoiceTensorTrans(choices_torch, choices_mask, mask_torch))
 
             y_torch = torch.tensor(y, dtype=torch.float).view(1, 1)
             lengths_torch = torch.tensor(len(word_idxs)).view(1)
@@ -1535,9 +1553,13 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
         x_vals = data_util.multi_dim_padded_cat(x_vals, 0).long()
         trans_o = []
         for tran_id in range(length_perturb):
-            trans_o.append(
-                ibp.DiscreteChoiceTensorTrans(data_util.multi_dim_padded_cat(choice_mats[tran_id], 0).long(),
-                                              data_util.multi_dim_padded_cat(choice_masks[tran_id], 0).long(), masks))
+            if choice_mats[tran_id][0].shape[2] == 0:
+                trans_o.append(torch.zeros(B, max_len, 0, 0, 1).long())
+            else:
+                trans_o.append(
+                    ibp.DiscreteChoiceTensorTrans(data_util.multi_dim_padded_cat(choice_mats[tran_id], 0).long(),
+                                                  data_util.multi_dim_padded_cat(choice_masks[tran_id], 0).long(),
+                                                  masks))
             trans_phi[tran_id] = data_util.multi_dim_padded_cat(trans_phi[tran_id], 0)
         return {'x': x_vals, 'trans_output': (trans_o, trans_phi), 'y': y, 'mask': masks, 'lengths': lengths}
 
