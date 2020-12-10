@@ -5,7 +5,7 @@ from utils import Beam
 
 
 class GeneralHotFlipAttack:
-    def __init__(self, perturbation: list):
+    def __init__(self, perturbation: list, use_random_aug=False):
         """
         :param list perturbation: A perturbation space specified in the DSL.
         For example, [(Sub(), 2), (Del(), 1)] means at most 2 Sub string transformations and at most 1 Del string
@@ -28,6 +28,7 @@ class GeneralHotFlipAttack:
             raise AttributeError("param perturbation %s is not in the correct form." % str(perturbation))
 
         self.perturbation = perturbation
+        self.use_random_aug = use_random_aug
 
     def gen_adv(self, model, x: list, y, top_n: int, get_embed, return_score=False):
         """
@@ -63,8 +64,11 @@ class GeneralHotFlipAttack:
                 for (candidate, _) in old_candidates:
                     if candidate not in perturbed_set:
                         if len(candidate.x) > 0:
-                            candidate.try_all_pos(possible_pos, tran, model.get_grad(candidate.x, y), get_embed,
-                                    candidates)
+                            if self.use_random_aug:
+                                candidate.try_all_pos(possible_pos, tran, None, None, candidates)
+                            else:
+                                candidate.try_all_pos(possible_pos, tran, model.get_grad(candidate.x, y), get_embed,
+                                                      candidates)
                         perturbed_set.add(candidate)
 
         ret = candidates.check_balance()
@@ -111,12 +115,15 @@ class Candidate:
 
                 for new_x in tran.transformer(self.x, start_pos_x, end_pos_x):
                     delta_len = len(new_x) - len(self.x)
-                    old_embedding = get_embed(self.x[start_pos_x:])
-                    # ret_len specifies the ret length (padding if not enought)
-                    new_embedding = get_embed(new_x[start_pos_x:min(len(new_x), len(self.x))],
-                                              ret_len=len(self.x) - start_pos_x)
-                    # gradients[start_pos_x:] has shape (len(self.x) - start_pos_x, dim)
-                    new_score = self.score + np.sum(gradients[start_pos_x:] * (new_embedding - old_embedding))
+                    if get_embed is not None and gradients is not None:
+                        old_embedding = get_embed(self.x[start_pos_x:])
+                        # ret_len specifies the ret length (padding if not enought)
+                        new_embedding = get_embed(new_x[start_pos_x:min(len(new_x), len(self.x))],
+                                                  ret_len=len(self.x) - start_pos_x)
+                        # gradients[start_pos_x:] has shape (len(self.x) - start_pos_x, dim)
+                        new_score = self.score + np.sum(gradients[start_pos_x:] * (new_embedding - old_embedding))
+                    else:  # we use random sampling
+                        new_score = self.score + 0.5 - np.random.random()
                     new_map_ori2x = self.map_ori2x[:start_pos_ori] + [None] * (end_pos_ori - start_pos_ori) + [
                         p if p is None else p + delta_len for p in self.map_ori2x[end_pos_ori:]]
                     new_candidate = Candidate(new_x, new_score, new_map_ori2x)

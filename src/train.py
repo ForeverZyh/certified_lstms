@@ -120,7 +120,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   eps_schedule = torch.tensor(np.linspace(initial_cert_eps, cert_eps, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
   aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
   if OPTS.adv_perturbation is not None:
-    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation))
+    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation), OPTS.use_random_aug)
     victim_model = ModelWrapper(model, train_data.vocab, device)
   else:
     attack = None
@@ -273,7 +273,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
   data = dataset.get_loader(32)
   aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
   if OPTS.adv_perturbation is not None:
-    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation))
+    attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation), OPTS.use_random_aug)
     victim_model = ModelWrapper(model, dataset.vocab, device)
   else:
     attack = None
@@ -356,6 +356,7 @@ def parse_args():
   parser.add_argument('--aug-perturbation', type=str, default=None, help='Perturbation for exhaustive training')
   parser.add_argument('--adv-perturbation', type=str, default=None,
                       help='Perturbation for hotflip adv training & hotflip adv testing')
+  parser.add_argument('--use-random-aug', type=bool, default=False, help='Random sample from the perturbation space')
   parser.add_argument('--adv-beam', type=int, default=5, help='HotFlip attack (test) beam size')
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)

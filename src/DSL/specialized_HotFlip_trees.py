@@ -6,7 +6,7 @@ from utils import Beam, cons_tree
 
 
 class HotFlipAttackTree:
-    def __init__(self, perturbation: list):
+    def __init__(self, perturbation: list, use_random_aug=False):
         """
         General HotFlip Attack for trees (on TreeLSTM)
         :param list perturbation: A perturbation space specified in the DSL.
@@ -27,6 +27,7 @@ class HotFlipAttackTree:
                 perturbation))
 
         self.perturbation = perturbation
+        self.use_random_aug = use_random_aug
 
     def gen_adv(self, model, tree, x: list, top_n: int, dataset_vocab, return_score=False):
         """
@@ -60,9 +61,12 @@ class HotFlipAttackTree:
                 for (candidate, _) in old_candidates:
                     if candidate not in perturbed_set:
                         if len(x) > 0:
-                            candidate.try_all_pos(meta_data, possible_pos, tran,
-                                                  model.get_grad(candidate.tree, isinstance(tran, Ins)),
-                                                  model, candidates)
+                            if self.use_random_aug:
+                                candidate.try_all_pos(meta_data, possible_pos, tran, None, model, candidates)
+                            else:
+                                candidate.try_all_pos(meta_data, possible_pos, tran,
+                                                      model.get_grad(candidate.tree, isinstance(tran, Ins)),
+                                                      model, candidates)
                         perturbed_set.add(candidate)
 
         ret = candidates.check_balance()
@@ -129,25 +133,34 @@ class CandidateTree:
                     if isinstance(tran, Del):
                         new_trans_on_pos = self.trans_on_pos[:start_pos_ori] + [1] + self.trans_on_pos[end_pos_ori:]
                         new_syns_on_pos = copy.copy(self.syns_on_pos)
-                        old_embedding = get_embed([self.x[start_pos_x]])[0]  # (dim)
-                        new_score = self.score + np.sum((0 - old_embedding) * gradients[start_pos_x])
+                        if gradients is not None:
+                            old_embedding = get_embed([self.x[start_pos_x]])[0]  # (dim)
+                            new_score = self.score + np.sum((0 - old_embedding) * gradients[start_pos_x])
+                        else:
+                            new_score = self.score + 0.5 - np.random.random()
                     elif isinstance(tran, Ins):
                         new_trans_on_pos = self.trans_on_pos[:start_pos_ori] + [2] + self.trans_on_pos[end_pos_ori:]
                         new_syns_on_pos = copy.copy(self.syns_on_pos)
                         old_embedding = get_embed([self.x[start_pos_x]])  # (1, dim)
-                        ioux_grads, c_grads = gradients
-                        delta_ioux, delta_c = victim_model.model.cal_delta_Ins(old_embedding)
-                        new_score = self.score + np.sum(ioux_grads[start_pos_x] * delta_ioux) + np.sum(
-                            c_grads[start_pos_x] * delta_c)
+                        if gradients is not None:
+                            ioux_grads, c_grads = gradients
+                            delta_ioux, delta_c = victim_model.model.cal_delta_Ins(old_embedding)
+                            new_score = self.score + np.sum(ioux_grads[start_pos_x] * delta_ioux) + np.sum(
+                                c_grads[start_pos_x] * delta_c)
+                        else:
+                            new_score = self.score + 0.5 - np.random.random()
                     elif isinstance(tran, Sub):
                         if vocab.get(new_x[start_pos_x], -1) == -1:
                             continue
                         new_trans_on_pos = self.trans_on_pos[:start_pos_ori] + [3] + self.trans_on_pos[end_pos_ori:]
                         new_syns_on_pos = self.syns_on_pos[:start_pos_ori] + [new_x[start_pos_x]] + self.syns_on_pos[
                                                                                                     end_pos_ori:]
-                        old_embedding = get_embed([self.x[start_pos_x]])[0]  # (dim)
-                        new_embedding = get_embed([new_x[start_pos_x]])[0]  # (dim)
-                        new_score = self.score + np.sum((new_embedding - old_embedding) * gradients[start_pos_x])
+                        if gradients is not None:
+                            old_embedding = get_embed([self.x[start_pos_x]])[0]  # (dim)
+                            new_embedding = get_embed([new_x[start_pos_x]])[0]  # (dim)
+                            new_score = self.score + np.sum((new_embedding - old_embedding) * gradients[start_pos_x])
+                        else:
+                            new_score = self.score + 0.5 - np.random.random()
                     else:
                         raise NotImplementedError
                     new_tree = cons_tree(ori, new_trans_on_pos, new_syns_on_pos, old_tree, vocab)
