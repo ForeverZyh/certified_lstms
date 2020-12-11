@@ -52,7 +52,7 @@ class GeneralHotFlipAttack:
         except:
             raise AttributeError("The victim model does not support get_grad method.")
 
-        candidate = Candidate(x, 0)
+        candidate = Candidate(x, 0 if not self.use_random_aug else np.random.random())
         candidates = Beam(top_n)
         candidates.add(candidate, candidate.score)
         for (tran, delta) in self.perturbation:
@@ -123,7 +123,7 @@ class Candidate:
                         # gradients[start_pos_x:] has shape (len(self.x) - start_pos_x, dim)
                         new_score = self.score + np.sum(gradients[start_pos_x:] * (new_embedding - old_embedding))
                     else:  # we use random sampling
-                        new_score = self.score + 0.5 - np.random.random()
+                        new_score = np.random.random()
                     new_map_ori2x = self.map_ori2x[:start_pos_ori] + [None] * (end_pos_ori - start_pos_ori) + [
                         p if p is None else p + delta_len for p in self.map_ori2x[end_pos_ori:]]
                     new_candidate = Candidate(new_x, new_score, new_map_ori2x)

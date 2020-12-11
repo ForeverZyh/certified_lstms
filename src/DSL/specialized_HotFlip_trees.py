@@ -49,7 +49,7 @@ class HotFlipAttackTree:
             raise AttributeError("The victim model does not support get_grad method.")
 
         meta_data = (x, tree, dataset_vocab)
-        candidate = CandidateTree(tree, x, 0)
+        candidate = CandidateTree(tree, x, 0 if not self.use_random_aug else np.random.random())
         candidates = Beam(top_n)
         candidates.add(candidate, candidate.score)
         for (tran, delta) in self.perturbation:
@@ -137,7 +137,7 @@ class CandidateTree:
                             old_embedding = get_embed([self.x[start_pos_x]])[0]  # (dim)
                             new_score = self.score + np.sum((0 - old_embedding) * gradients[start_pos_x])
                         else:
-                            new_score = self.score + 0.5 - np.random.random()
+                            new_score = np.random.random()
                     elif isinstance(tran, Ins):
                         new_trans_on_pos = self.trans_on_pos[:start_pos_ori] + [2] + self.trans_on_pos[end_pos_ori:]
                         new_syns_on_pos = copy.copy(self.syns_on_pos)
@@ -148,7 +148,7 @@ class CandidateTree:
                             new_score = self.score + np.sum(ioux_grads[start_pos_x] * delta_ioux) + np.sum(
                                 c_grads[start_pos_x] * delta_c)
                         else:
-                            new_score = self.score + 0.5 - np.random.random()
+                            new_score = np.random.random()
                     elif isinstance(tran, Sub):
                         if vocab.get(new_x[start_pos_x], -1) == -1:
                             continue
@@ -160,7 +160,7 @@ class CandidateTree:
                             new_embedding = get_embed([new_x[start_pos_x]])[0]  # (dim)
                             new_score = self.score + np.sum((new_embedding - old_embedding) * gradients[start_pos_x])
                         else:
-                            new_score = self.score + 0.5 - np.random.random()
+                            new_score = np.random.random()
                     else:
                         raise NotImplementedError
                     new_tree = cons_tree(ori, new_trans_on_pos, new_syns_on_pos, old_tree, vocab)
