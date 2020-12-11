@@ -405,7 +405,7 @@ if __name__ == '__main__':
     parser.add_argument('--aug-perturbation', type=str, default=None, help='Perturbation for exhaustive training')
     parser.add_argument('--adv-perturbation', type=str, default=None,
                         help='Perturbation for hotflip adv training & hotflip adv testing')
-    parser.add_argument('--use-random-aug', type=bool, default=False, help='Random sample from the perturbation space')
+    parser.add_argument('--use-random-aug', action='store_true', help='Random sample from the perturbation space')
     parser.add_argument('--adv-beam', type=int, default=5, help='HotFlip attack (test) beam size')
     parser.add_argument('--full-train-epochs', type=int, default=0,
                         help='If specified use full cert_frac and cert_eps for this many epochs at the end')
