@@ -147,6 +147,7 @@ def train(args, model, trainset, devset, device, trainset_vocab, victim_model=No
     eps_schedule = th.tensor(
         np.linspace(0, 1, num_epochs - args.full_train_epochs - args.non_cert_train_epochs), dtype=th.float,
         device=device)
+    pre_best = -1
     for t in range(num_epochs):
         model.train()
         if t < args.non_cert_train_epochs:
@@ -270,6 +271,11 @@ def train(args, model, trainset, devset, device, trainset_vocab, victim_model=No
             json.dump(epoch, outfile)
         with open(os.path.join(args.out_dir, "all_epoch_stats.json"), "w") as outfile:
             json.dump(all_epoch_stats, outfile)
+        if args.early_stopping is not None:
+            if is_best:
+                pre_best = t
+            elif t - pre_best >= args.early_stopping:
+                break
         if is_best or t == num_epochs - 1:
             if is_best:
                 for fn in glob.glob(os.path.join(args.out_dir, 'model-checkpoint*.pth')):
@@ -391,6 +397,7 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--no-wordvec-layer', action='store_true', help="Don't apply linear transform to word vectors")
     parser.add_argument('--clip-grad-norm', type=float, default=None)
+    parser.add_argument('--early-stopping', type=int, default=None)
 
     # Loading
     parser.add_argument('--load-dir', '-L', help='Where to load checkpoint')

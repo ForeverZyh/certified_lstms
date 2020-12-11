@@ -125,6 +125,7 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   else:
     attack = None
     victim_model = None
+  pre_best = -1
   for t in range(num_epochs):
     model.train()
     if t < non_cert_train_epochs:
@@ -243,6 +244,11 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
       json.dump(epoch, outfile)
     with open(os.path.join(OPTS.out_dir, "all_epoch_stats.json"), "w") as outfile:
       json.dump(all_epoch_stats, outfile)
+    if OPTS.early_stopping is not None:
+      if is_best:
+        pre_best = t
+      elif t - pre_best >= OPTS.early_stopping:
+        break
     if ((save_best_only and is_best)
         or (not save_best_only and epochs_per_save and (t+1) % epochs_per_save == 0)
         or t == num_epochs - 1):
@@ -385,6 +391,7 @@ def parse_args():
                       help='How many augmented examples per real example')
   parser.add_argument('--eaugment-by', type=int, default=0,
                       help='How many exhaustively augmented examples per real example')
+  parser.add_argument('--early-stopping', type=int, default=None)
   # Data and files
   parser.add_argument('--dataset', choices=['SST2', 'Imdb', 'snli'], default=None)
   parser.add_argument('--adv-only', action='store_true', help='Only run the adversary against the model on the given evaluation set')
