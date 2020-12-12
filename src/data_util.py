@@ -24,7 +24,14 @@ def dict_batch_to_device(batch, device):
     return batch.to(device)
   except AttributeError:
     # don't have a to function, must be a dict, recursively move to device
-    return {k: dict_batch_to_device(v, device) for k, v in batch.items()}
+    if isinstance(batch, dict):
+      return {k: dict_batch_to_device(v, device) for k, v in batch.items()}
+    elif isinstance(batch, tuple):
+      return tuple(dict_batch_to_device(x, device) for x in batch)
+    elif isinstance(batch, list):
+      return [dict_batch_to_device(x, device) for x in batch]
+    else:
+      raise NotImplementedError
 
 
 class RawDataset(Dataset):

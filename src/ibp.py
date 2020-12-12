@@ -4,6 +4,7 @@ import numpy as np
 import queue
 import torch
 from functools import partial
+from itertools import product
 from torch import nn
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
@@ -53,7 +54,7 @@ class IntervalBoundedTensor(BoundedTensor):
             max_lb_violation = torch.max((lb - val) * (lb <= ub).float())  # exclude bottom
             if max_lb_violation > TOLERANCE:
                 print('WARNING: Lower bound wrong (max error = %g)' % max_lb_violation.item(), file=sys.stderr)
-            max_ub_violation = torch.max((val - ub) * (lb <= ub).float()) # exclude bottom
+            max_ub_violation = torch.max((val - ub) * (lb <= ub).float())  # exclude bottom
             if max_ub_violation > TOLERANCE:
                 print('WARNING: Upper bound wrong (max error = %g)' % max_ub_violation.item(), file=sys.stderr)
 
@@ -69,6 +70,9 @@ class IntervalBoundedTensor(BoundedTensor):
     @staticmethod
     def point(x):
         return IntervalBoundedTensor(x, x.clone(), x.clone())
+
+    def float(self):
+        return IntervalBoundedTensor(self.val.float(), self.lb.float(), self.ub.float())
 
     ### Reimplementations of torch.Tensor methods
     def __neg__(self):
@@ -192,6 +196,55 @@ class DiscreteChoiceTensorWithUNK(BoundedTensor):
         return self
 
 
+class DiscreteChoiceTensorTrans(BoundedTensor):
+    """A tensor for which each row can take a discrete set of values.
+
+    More specifically, each slice along the first d-1 dimensions of the tensor
+    is allowed to take on values within some discrete set.
+    The overall tensor's possible values are the direct product of all these
+    individual choices.
+
+    Recommended usage is only as an input tensor, passed to Linear() layer.
+    Only some layers accept this tensor.
+    """
+
+    def __init__(self, choice_mat, choice_mask, sequence_mask):
+        """Create a DiscreteChoiceTensor.
+
+        Args:
+          choice_mat: all choices-padded with 0 where fewer than max choices are available, size (*, tran.t, C, d)
+          choice_mask: mask tensor s.t. choice_maks[i,j,k]==1 iff choice_mat[i,j,k,:] is a valid choice, size (*, tran.t, C)
+          sequence_mask: mask tensor s.t. sequence_mask[i,j,k]==1 iff choice_mat[i,j] is a valid word in a sequence and not padding, size (*)
+        """
+        self.choice_mat = choice_mat
+        self.choice_mask = choice_mask
+        self.sequence_mask = sequence_mask
+
+    def to_interval_bounded(self, eps=1.0):
+        """
+        Convert to an IntervalBoundedTensor.
+        Args:
+          - eps: float, scaling factor for the interval bounds
+        """
+        choice_mask_mat = (((1 - self.choice_mask).float() * 1e16)).unsqueeze(-1)  # *, tran.t, C, 1
+        seq_mask_mat = self.sequence_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
+        # lb, ub are in the shape of (*, tran.t, d)
+        lb = torch.min((self.choice_mat + choice_mask_mat) * seq_mask_mat, -2)[0] * seq_mask_mat.squeeze(-1)
+        ub = torch.max((self.choice_mat - choice_mask_mat) * seq_mask_mat, -2)[0] * seq_mask_mat.squeeze(-1)
+        val = (lb + ub) / 2  # use the middle point as the val
+        if eps != 1.0:
+            lb = val - (val - lb) * eps
+            ub = val + (ub - val) * eps
+        return IntervalBoundedTensor(val, lb, ub)
+
+    def to(self, device):
+        """Moves the Tensor to the given device"""
+        self.choice_mat = self.choice_mat.to(device)
+        self.choice_mask = self.choice_mask.to(device)
+        self.sequence_mask = self.sequence_mask.to(device)
+        return self
+
+
 class NormBallTensor(BoundedTensor):
     """A tensor for which each is within some norm-ball of the original value."""
 
@@ -221,6 +274,9 @@ class Linear(nn.Linear):
             new_val = F.linear(x.val, self.weight, self.bias)
             new_choices = F.linear(x.choice_mat, self.weight, self.bias)
             return DiscreteChoiceTensorWithUNK(new_val, new_choices, x.choice_mask, x.sequence_mask, x.unk_mask)
+        elif isinstance(x, DiscreteChoiceTensorTrans):
+            new_choices = F.linear(x.choice_mat, self.weight, self.bias)
+            return DiscreteChoiceTensorTrans(new_choices, x.choice_mask, x.sequence_mask)
         elif isinstance(x, NormBallTensor):
             q = 1.0 / (1.0 - 1.0 / x.p_norm)  # q from Holder's inequality
             z = F.linear(x.val, self.weight, self.bias)
@@ -294,6 +350,11 @@ class Embedding(nn.Embedding):
                 x.choice_mat.squeeze(-1), self.weight, self.padding_idx, self.max_norm,
                 self.norm_type, self.scale_grad_by_freq, self.sparse)
             return DiscreteChoiceTensorWithUNK(new_val, new_choices, x.choice_mask, x.sequence_mask, x.unk_mask)
+        elif isinstance(x, DiscreteChoiceTensorTrans):
+            new_choices = F.embedding(
+                x.choice_mat.squeeze(-1), self.weight, self.padding_idx, self.max_norm,
+                self.norm_type, self.scale_grad_by_freq, self.sparse)
+            return DiscreteChoiceTensorTrans(new_choices, x.choice_mask, x.sequence_mask)
         else:
             raise TypeError(x)
 
@@ -739,6 +800,251 @@ class LSTMDP(nn.Module):
         return h_mat, c_mat
 
 
+class LSTMDPGeneral(nn.Module):
+    """An LSTM."""
+
+    def __init__(self, input_size, hidden_size, perturbation, device):
+        super(LSTMDPGeneral, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.device = device
+        self.perturbation, self.deltas = perturbation
+        self.i2h = Linear(input_size, 4 * hidden_size)
+        self.h2h = Linear(hidden_size, 4 * hidden_size)
+        self.deltas_p1 = [delta + 1 for delta in self.deltas]
+        self.deltas_ranges = [range(x) for x in self.deltas_p1]
+
+    def _step(self, h, c, x_t, i2h, h2h, analysis_mode=False):
+        preact = add(i2h(x_t), h2h(h))
+        g_t = activation(torch.tanh, preact[:, 3 * self.hidden_size:])
+        gates = activation(torch.sigmoid, preact[:, :3 * self.hidden_size])
+        i_t = gates[:, :self.hidden_size]
+        f_t = gates[:, self.hidden_size:2 * self.hidden_size]
+        o_t = gates[:, 2 * self.hidden_size:]
+        c_t = add(mul(c, f_t), mul(i_t, g_t))
+        h_t = mul(o_t, activation(torch.tanh, c_t))
+        if analysis_mode:
+            return h_t, c_t, i_t, f_t, o_t
+        return h_t, c_t
+
+    def _process(self, h, c, x, i2h, h2h, length, mask=None, analysis_mode=False):
+
+        B, T, d = x.shape  # batch_first=True
+        idxs = range(T)
+        h_seq = []
+        c_seq = []
+        if analysis_mode:
+            i_seq = []
+            f_seq = []
+            o_seq = []
+        for i in idxs:
+            x_t = x[:, i, :]  # B, d_in
+            if analysis_mode:
+                h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
+                i_seq.append(i_t)
+                f_seq.append(f_t)
+                o_seq.append(o_t)
+            else:
+                h_t, c_t = self._step(h, c, x_t, i2h, h2h)
+            if mask is not None:
+                # Don't update h or c when mask is 0
+                mask_t = mask[:, i].unsqueeze(1)  # B,1
+                h = h_t * mask_t + h * (1.0 - mask_t)
+                c = c_t * mask_t + c * (1.0 - mask_t)
+            h_seq.append(h)
+            c_seq.append(c)
+
+        if analysis_mode:
+            return h_seq, c_seq, i_seq, f_seq, o_seq, length
+        return h_seq, c_seq, length
+
+    def _processDP(self, _trans_output: tuple, h, c, x, i2h, h2h, length, mask=None, analysis_mode=False):
+        """
+        A general DP
+        :param _trans_output: a tuple (trans_o, trans_phi)
+        trans_o is a list of interval bound tensors, each of which has the shape (B, T, tran.t, word_vec_size / h_size).
+        trans_o[tran_id][:, i, j, :] means that trans[tran_id] matches at the input positions
+        i ~ (i + trans[tran_id].s - 1), how the j-th output of trans[id] can be. (j = 0 ~ trans[tran_id].t - 1).
+        trans_phi is a list of bool tensors, each of which has the shape (B, T).
+        :param h: hidden states
+        :param c: cell states
+        :param x: input sequence (B, T, word_vec_size or h_size)
+        :param i2h: input to hidden linear layer
+        :param h2h: hidden to hidden linear layer
+        :param mask: mask for the input sequence (B, T)
+        :param analysis_mode: do we need to return intermediary results
+        :return: a list of hidden states in the interval bound form and a possible length interval
+        """
+        trans_o, trans_phi = _trans_output
+        B, T, _ = x.shape  # batch_first=True
+        max_out_len = T
+        for delta, tran in zip(self.deltas, self.perturbation):
+            if tran.t > tran.s:
+                max_out_len += (tran.t - tran.s) * delta
+        mask = mask.unsqueeze(-1)
+        d = self.hidden_size
+        D = len(self.deltas)
+        x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
+        length_lb = [-1] * B
+        length_ub = [-1] * B
+
+        def compute_state(h, c, x_t, mask_t):
+            if analysis_mode:
+                h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
+            else:
+                h_t, c_t = self._step(h, c, x_t, i2h, h2h)
+            if mask_t is not None:
+                # Don't update h or c when mask is 0
+                h_t = h_t * mask_t + h * (1.0 - mask_t)
+                c_t = c_t * mask_t + c * (1.0 - mask_t)
+
+            if analysis_mode:
+                return h_t, c_t, i_t, f_t, o_t
+            return h_t, c_t
+
+        def cal_in_pos(out_pos, deltas):
+            # compute the input position for deltas
+            in_pos = out_pos
+            for delta, tran in zip(deltas, self.perturbation):
+                in_pos += (tran.s - tran.t) * delta
+            return in_pos
+
+        # a feasible set of states (B, *self.deltas_p1)
+        feasible = torch.zeros(B, *self.deltas_p1).bool().to(self.device)
+        all_zeros = (0,) * len(self.deltas_p1)
+        feasible[(slice(None),) + all_zeros] = 1
+        ans = []
+        len_cur_states = np.prod(self.deltas_p1)
+        state2id = {}
+        for state_id, deltas in enumerate(product(*self.deltas_ranges)):
+            state2id[deltas] = state_id
+        cur_states = [(IntervalBoundedTensor.point(h), IntervalBoundedTensor.point(c))] + [None] * (len_cur_states - 1)
+        for i in range(max_out_len + 1):  # + 1 make sure the last state is added.
+            # cur_states should read as pre_states here.
+            for state_id, deltas in enumerate(product(*self.deltas_ranges)):
+                # compute the input position for deltas
+                _in_pos = cal_in_pos(i - 1, deltas)
+
+                for tran_id, tran in enumerate(self.perturbation):
+                    if deltas[tran_id] > 0 and tran.t == 0:
+                        pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
+                        # the input position for pre_deltas
+                        in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
+                        if 0 <= in_pos < T and torch.any(
+                                feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos]):
+                            cur_states[state_id] = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
+                            feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas] | (
+                                    feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos])
+
+            # update ans and h, c
+            cur_states_ret = [[] for _ in range(len(cur_states[0]))]
+            cur_ans = None
+            for cur_state in cur_states:
+                cur_ans = merge(cur_ans, cur_state)
+                for j in range(len(cur_states_ret)):
+                    cur_states_ret[j].append(cur_state[j] if cur_state is not None else cur_states[0][j])
+
+            for j in range(len(cur_states_ret)):
+                cur_states_ret[j] = stack(cur_states_ret[j], dim=0)
+
+            h, c = cur_states_ret[0].view(*self.deltas_p1, B, d), cur_states_ret[1].view(*self.deltas_p1, B, d)
+            if i > 0:
+                ans.append(cur_ans)
+                # calculate the possible length of each sentence, the length_lb and ub are not related to the NN
+                # parameters. In other words, it is ok to decouple them from the gradient descent process.
+                for s_id in range(B):
+                    for deltas in product(*self.deltas_ranges):
+                        in_pos = cal_in_pos(i - 1, deltas)
+                        if in_pos == length[s_id].item() - 1 and feasible[(s_id,) + deltas].item():
+                            length_ub[s_id] = i
+                            if length_lb[s_id] == -1:
+                                length_lb[s_id] = i
+
+            # calculate cur_states by DP
+            cur_feasible = torch.zeros_like(feasible)
+            cur_states = []
+            for deltas in product(*self.deltas_ranges):
+                _in_pos = cal_in_pos(i, deltas)
+
+                # Case 1: do not transform at this position
+                cur_state = None
+                # _in_pos cannot exceed T
+                if feasible[(slice(None),) + deltas].any().item() and 0 <= _in_pos < T:
+                    cur_state = compute_state(h[deltas], c[deltas], x[:, _in_pos, :], mask[:, _in_pos, :])
+                    cur_feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas]
+
+                # Case 2: let's enumerate a transformation
+                for tran_id, tran in enumerate(self.perturbation):
+                    if deltas[tran_id] > 0 and tran.t > 0:
+                        pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
+                        if feasible[(slice(None),) + pre_deltas].any().item():
+                            # the input position for pre_deltas
+                            in_pos = _in_pos - (tran.s - tran.t)
+                            for j in range(tran.t):
+                                # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
+                                if 0 <= in_pos - j < T and torch.any(
+                                        feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]):
+                                    cur_h, cur_c = compute_state(h[pre_deltas], c[pre_deltas],
+                                                                 trans_o[tran_id][:, in_pos - j, j, :], None)
+                                    # cur_h, cur_c have the shape (B, h_size)
+                                    cur_h = where(trans_phi[tran_id][:, in_pos - j].unsqueeze(-1), cur_h, h[all_zeros])
+                                    cur_c = where(trans_phi[tran_id][:, in_pos - j].unsqueeze(-1), cur_c, c[all_zeros])
+                                    cur_state = merge(cur_state, (cur_h, cur_c))
+                                    cur_feasible[(slice(None),) + deltas] |= feasible[(slice(None),) + pre_deltas] & \
+                                                                             trans_phi[tran_id][:, in_pos - j]
+
+                if cur_state is not None:
+                    cur_states.append(cur_state)
+                else:
+                    if len(cur_states) == 0:  # if the 0-state is invalid, then we are going to end the DP process.
+                        break
+                    cur_states.append(cur_states[0])
+
+            # if feasible is not updated, then the DP process is over.
+            # some may doubt that we need to break after considering tran.t == 0, but the longest perturbed sentences
+            # cannot take any such transformation.
+            if not cur_feasible.any().item():
+                break
+
+            feasible = cur_feasible
+
+        ret = [[] for _ in range(len(ans[0]))]
+        for i in range(len(ans)):
+            for j in range(len(ret)):
+                ret[j].append(ans[i][j])
+
+        assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
+        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long(), torch.Tensor(length_ub).long())]
+
+    def forward(self, x, trans_output, s0, length, mask=None, analysis_mode=False):
+        """Forward pass of LSTM
+
+        Args:
+          x: word vectors, size (B, T, d)
+          s0: tuple of (h0, x0) where each is (B, d)
+          mask: If provided, 0-1 mask of size (B, T)
+        """
+        h0, c0 = s0  # Each is (B, d)
+        if trans_output is None:
+            process = self._process
+        else:
+            process = partial(self._processDP, trans_output)
+        if analysis_mode:
+            h_seq, c_seq, i_seq, f_seq, o_seq, length_interval = process(
+                h0, c0, x, self.i2h, self.h2h, length, mask=mask, analysis_mode=True)
+        else:
+            h_seq, c_seq, length_interval = process(h0, c0, x, self.i2h, self.h2h, length, mask=mask)
+
+        h_mat = stack(h_seq, dim=1)  # list of (B, d) -> (B, T, d)
+        c_mat = stack(c_seq, dim=1)  # list of (B, d) -> (B, T, d)
+        if analysis_mode:
+            i_mat = stack(i_seq, dim=1)
+            f_mat = stack(f_seq, dim=1)
+            o_mat = stack(o_seq, dim=1)
+            return h_mat, c_mat, (i_mat, f_mat, o_mat), length_interval
+        return h_mat, c_mat, length_interval
+
+
 class GRU(nn.Module):
     """A GRU."""
 
@@ -878,12 +1184,23 @@ def div(x1, x2):
     """Elementwise division of two tensors."""
     if isinstance(x1, torch.Tensor) and isinstance(x2, torch.Tensor):
         return torch.div(x1, x2)
-    if isinstance(x1, IntervalBoundedTensor) and isinstance(x2, torch.Tensor):
+    if isinstance(x1, IntervalBoundedTensor) and (isinstance(x2, torch.Tensor) or isinstance(x2, int)):
         z = torch.div(x1.val, x2)
         lb_div = torch.div(x1.lb, x2)
         ub_div = torch.div(x1.ub, x2)
         lb_new = torch.min(lb_div, ub_div)
         ub_new = torch.max(lb_div, ub_div)
+        return IntervalBoundedTensor(z, lb_new, ub_new)
+    elif isinstance(x1, IntervalBoundedTensor) and isinstance(x2, IntervalBoundedTensor):
+        assert ((x2.lb > 0) | (x2.ub < 0)).all().item()  # only implement when x2 cannot be zero
+        z = torch.div(x1.val, x2.val)
+        ll = torch.div(x1.lb, x2.lb)
+        lu = torch.div(x1.lb, x2.ub)
+        ul = torch.div(x1.ub, x2.lb)
+        uu = torch.div(x1.ub, x2.ub)
+        stack = torch.stack((ll, lu, ul, uu))
+        lb_new = torch.min(stack, dim=0)[0]
+        ub_new = torch.max(stack, dim=0)[0]
         return IntervalBoundedTensor(z, lb_new, ub_new)
     else:
         raise TypeError(x1, x2)
@@ -1165,14 +1482,4 @@ def where(pred: torch.Tensor, x1: IntervalBoundedTensor, x2: IntervalBoundedTens
         torch.where(pred, x1.val, x2.val),
         torch.where(pred, x1.lb, x2.lb),
         torch.where(pred, x1.ub, x2.ub)
-    )
-
-
-def cat(xs, dim):
-    if not isinstance(xs[0], IntervalBoundedTensor):
-        return torch.cat(xs, dim=dim)
-    return IntervalBoundedTensor(
-        torch.cat([x.val for x in xs], dim=dim),
-        torch.cat([x.lb for x in xs], dim=dim),
-        torch.cat([x.ub for x in xs], dim=dim),
     )
