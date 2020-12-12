@@ -1184,7 +1184,7 @@ def div(x1, x2):
     """Elementwise division of two tensors."""
     if isinstance(x1, torch.Tensor) and isinstance(x2, torch.Tensor):
         return torch.div(x1, x2)
-    if isinstance(x1, IntervalBoundedTensor) and isinstance(x2, torch.Tensor):
+    if isinstance(x1, IntervalBoundedTensor) and (isinstance(x2, torch.Tensor) or isinstance(x2, int)):
         z = torch.div(x1.val, x2)
         lb_div = torch.div(x1.lb, x2)
         ub_div = torch.div(x1.ub, x2)

@@ -509,6 +509,41 @@ class LSTMDPGeneralModel(AdversarialModel):
 
         return self.out_x_vecs.grad.cpu().numpy()
 
+    def query(self, x, vocab, device, return_bounds=False, attack_surface=None, perturbation=None):
+        """Query the model on a Dataset.
+
+        Args:
+          x: a string or a list
+          vocab: vocabulary
+          device: torch device.
+
+        Returns: list of logits of same length as |examples|.
+        """
+        if perturbation is None:
+            return super(LSTMDPGeneralModel, self).query(x, vocab, device, return_bounds, attack_surface, perturbation)
+        if isinstance(x, str):
+            dataset = TextClassificationDatasetGeneral.from_raw_data(
+                [(x, 0)], vocab, attack_surface=attack_surface, perturbation=perturbation)
+            data = dataset.get_loader(1)
+        else:
+            dataset = TextClassificationDatasetGeneral.from_raw_data(
+                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface, perturbation=perturbation)
+            data = dataset.get_loader(len(x))
+
+        with torch.no_grad():
+            batch = data_util.dict_batch_to_device(next(iter(data)), device)
+            logits = self.forward(batch, compute_bounds=return_bounds)
+            if isinstance(x, str):
+                if return_bounds:
+                    return logits.val[0].item(), (logits.lb[0].item(), logits.ub[0].item())
+                else:
+                    return logits[0].item()
+            else:
+                if return_bounds:
+                    return logits.val, (logits.lb, logits.ub)
+                else:
+                    return logits
+
     def forward(self, batch, compute_bounds=True, cert_eps=1.0, analysis_mode=False):
         """
         Args:
@@ -522,9 +557,10 @@ class LSTMDPGeneralModel(AdversarialModel):
         x = batch['x']
         mask = batch['mask']
         lengths = batch['lengths']
-        trans_o, trans_phi = batch['trans_output']
 
         B = x.shape[0]
+        if not compute_bounds and isinstance(x, ibp.DiscreteChoiceTensorWithUNK):
+            x = x.val
         x_vecs = self.embs(x)  # B, n, d
         if self.adv_attack:
             x_vecs.requires_grad = True
@@ -539,6 +575,7 @@ class LSTMDPGeneralModel(AdversarialModel):
         # compute z_interval
         trans_output = None
         if compute_bounds:
+            trans_o, trans_phi = batch['trans_output']
             z_interval = []
             for o in trans_o:
                 if isinstance(o, ibp.DiscreteChoiceTensorTrans):
@@ -566,11 +603,15 @@ class LSTMDPGeneralModel(AdversarialModel):
                 h_masked = h_mat * mask.unsqueeze(2)  # only need to mask the state sequence
                 fc_in = ibp.sum(h_masked / lengths.to(dtype=torch.float).view(-1, 1, 1), 1)  # B, h
             else:
-                new_mask = torch.zeros(B, max_length).to(self.device)
+                fc_in = [None] * B
                 for i in range(B):
-                    new_mask[i, :lengths_interval.ub[i].item()] = 1
-                h_masked = h_mat * new_mask.unsqueeze(2)  # only need to mask the state sequence
-                fc_in = ibp.sum(h_masked / lengths_interval.float().view(-1, 1, 1), 1)  # B, h
+                    assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
+                    cum_sum = ibp.sum(h_mat[i, :lengths_interval.lb[i].item()], 0)
+                    fc_in[i] = cum_sum / lengths_interval.lb[i].item()
+                    for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item()):
+                        cum_sum += h_mat[i, j]
+                        fc_in[i] = fc_in[i].merge(cum_sum / j)
+                fc_in = ibp.stack(fc_in, dim=0)
         elif self.pool == 'final':
             if trans_output is None:
                 fc_in = h_mat[:, -1, :]  # B, h
@@ -791,6 +832,7 @@ class ExhaustiveAdversary(Adversary):
             orig_pred, (orig_lb, orig_ub) = model.query(
                 x, dataset.vocab, device, return_bounds=True,
                 attack_surface=self.attack_surface, perturbation=self.perturbation)
+            orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
             print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
                 orig_lb, orig_pred, orig_ub, cert_correct))
@@ -1509,7 +1551,10 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
                 choices_torch = data_util.multi_dim_padded_cat(choices_torch, dim=0).unsqueeze(
                     0)  # (1, T, tran.t, C, 1)
                 choices_mask = data_util.multi_dim_padded_cat(choices_mask, dim=0).unsqueeze(0)  # (1, T, tran.t, C)
-                trans_o.append(ibp.DiscreteChoiceTensorTrans(choices_torch, choices_mask, mask_torch))
+                if tran.t == 0:
+                    trans_o.append(torch.zeros(1, len(words), 0, 0, 1).long())
+                else:
+                    trans_o.append(ibp.DiscreteChoiceTensorTrans(choices_torch, choices_mask, mask_torch))
 
             y_torch = torch.tensor(y, dtype=torch.float).view(1, 1)
             lengths_torch = torch.tensor(len(word_idxs)).view(1)
@@ -1544,8 +1589,12 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
             # o and phi are two list with length of number of transformations
             for tran_id, (o, phi) in enumerate(zip(list_o, list_phi)):
                 trans_phi[tran_id].append(phi)
-                choice_mats[tran_id].append(o.choice_mat)
-                choice_masks[tran_id].append(o.choice_mask)
+                if isinstance(o, ibp.DiscreteChoiceTensorTrans):
+                    choice_mats[tran_id].append(o.choice_mat)
+                    choice_masks[tran_id].append(o.choice_mask)
+                else:
+                    choice_mats[tran_id].append(None)
+                    choice_masks[tran_id].append(None)
             cur_len = ex['x'].shape[1]
             masks[i, :cur_len] = list_o[0].sequence_mask[0]
             y[i, 0] = ex['y']
@@ -1553,7 +1602,7 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
         x_vals = data_util.multi_dim_padded_cat(x_vals, 0).long()
         trans_o = []
         for tran_id in range(length_perturb):
-            if choice_mats[tran_id][0].shape[2] == 0:
+            if choice_mats[tran_id][0] is None:
                 trans_o.append(torch.zeros(B, max_len, 0, 0, 1).long())
             else:
                 trans_o.append(
