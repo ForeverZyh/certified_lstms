@@ -331,8 +331,8 @@ class LSTMDPModel(AdversarialModel):
         self.hidden_size = hidden_size
         self.word_vec_size = word_vec_size
         self.pool = pool
-        if pool == 'final' and bidirectional:
-            raise AttributeError("bidirectional not available when pool='final'")
+        if pool != 'final':
+            raise NotImplementedError("pool = %s is not implemented!" % pool)
         self.no_wordvec_layer = no_wordvec_layer
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)

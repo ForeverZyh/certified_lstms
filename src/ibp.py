@@ -522,6 +522,7 @@ class LSTMDP(nn.Module):
         self.h2h = Linear(hidden_size, 4 * hidden_size)
         self.deltas = Perturbation.str2deltas(perturbation)
         self.deltas_p1 = [delta + 1 for delta in self.deltas]
+        self.Ins_delta = self.deltas[1]
         if bidirectional:
             self.back_i2h = Linear(input_size, 4 * hidden_size)
             self.back_h2h = Linear(hidden_size, 4 * hidden_size)
@@ -578,20 +579,15 @@ class LSTMDP(nn.Module):
         return h_seq, c_seq
 
     def _processDP(self, h, c, x, i2h, h2h, reverse=False, mask=None, analysis_mode=False, output=None, unk_mask=None):
-        if reverse:
-            x = x.flip(1)
-            output = output.flip(1)
-            if mask is not None:
-                mask = mask.flip(1)
-            if unk_mask is not None:
-                unk_mask = unk_mask.flip(1)
-
         B, T, _ = x.shape  # batch_first=True
         d = self.hidden_size
         D = len(self.deltas)
-        idxs = range(T)
+        idxs = list(range(T))
         if reverse:
-            idxs = idxs[::-1]
+            if self.Ins_delta > 0:
+                idxs = idxs[:-self.Ins_delta:-1] + idxs[-self.Ins_delta:] # we keep the paddings at the end
+            else:
+                idxs = idxs[::-1]
         x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
 
         def compute_state(h, c, x_t, mask_t, unk_mask_t):
@@ -748,6 +744,9 @@ class LSTMDP(nn.Module):
                 ans.append(ans_t)
 
         ret = [[] for _ in range(len(ans[0]))]
+        idxs = range(T) # recompute idxs, because the paddings are included in the final outputs
+        if reverse:
+            idxs = idxs[::-1]
         for i in idxs:
             for j in range(len(ret)):
                 ret[j].append(ans[i][j])
