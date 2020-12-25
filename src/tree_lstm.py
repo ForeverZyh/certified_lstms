@@ -365,19 +365,18 @@ class TreeLSTMDP(nn.Module):
 
         g = batch['trees']
         n = g.number_of_nodes()
-        leaf_ids = [i for i in range(g.number_of_nodes()) if g.in_degrees(i) == 0]
         h = th.zeros((n, self.h_size)).to(self.device)
         c = th.zeros((n, self.h_size)).to(self.device)
         logits = self.forward(batch, g, h, c, compute_bounds=False)
-        loss = CrossEntropyLoss()(logits, batch['y'])
+        loss = CrossEntropyLoss()(logits, batch['y']).sum()
         loss.backward()
 
         self.adv_attack = False
         if attack_Ins:
             self.adv_attack_Ins = False
-            return self.out_ioux_c[0].grad[leaf_ids].cpu().numpy(), self.out_ioux_c[1].grad[leaf_ids].cpu().numpy()
+            return self.out_ioux_c[0].grad[0].cpu().numpy(), self.out_ioux_c[1].grad[0].cpu().numpy()
 
-        return self.out_x_vecs.grad[leaf_ids].cpu().numpy()
+        return self.out_x_vecs.grad[0].cpu().numpy()
 
     def cal_delta_Ins(self, embedding):
         """

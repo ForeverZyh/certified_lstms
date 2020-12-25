@@ -141,8 +141,8 @@ class CandidateTree:
                     elif isinstance(tran, Ins):
                         new_trans_on_pos = self.trans_on_pos[:start_pos_ori] + [2] + self.trans_on_pos[end_pos_ori:]
                         new_syns_on_pos = copy.copy(self.syns_on_pos)
-                        old_embedding = get_embed([self.x[start_pos_x]])  # (1, dim)
                         if gradients is not None:
+                            old_embedding = get_embed([self.x[start_pos_x]])  # (1, dim)
                             ioux_grads, c_grads = gradients
                             delta_ioux, delta_c = victim_model.model.cal_delta_Ins(old_embedding)
                             new_score = self.score + np.sum(ioux_grads[start_pos_x] * delta_ioux) + np.sum(
