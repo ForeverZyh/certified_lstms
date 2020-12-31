@@ -744,10 +744,7 @@ class LSTMDP(nn.Module):
                 ans.append(ans_t)
 
         ret = [[] for _ in range(len(ans[0]))]
-        idxs = range(T) # recompute idxs, because the paddings are included in the final outputs
-        if reverse:
-            idxs = idxs[::-1]
-        for i in idxs:
+        for i in range(len(ans)):
             for j in range(len(ret)):
                 ret[j].append(ans[i][j])
 
