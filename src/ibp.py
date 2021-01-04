@@ -567,13 +567,6 @@ class LSTMDP(nn.Module):
                 c = c_t * mask_t + c * (1.0 - mask_t)
             h_seq.append(h)
             c_seq.append(c)
-        if reverse:
-            h_seq = h_seq[::-1]
-            c_seq = c_seq[::-1]
-            if analysis_mode:
-                i_seq = i_seq[::-1]
-                f_seq = f_seq[::-1]
-                o_seq = o_seq[::-1]
         if analysis_mode:
             return h_seq, c_seq, i_seq, f_seq, o_seq
         return h_seq, c_seq
