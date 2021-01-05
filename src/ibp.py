@@ -581,7 +581,7 @@ class LSTMDP(nn.Module):
                 idxs = idxs[:-self.Ins_delta:-1] + idxs[-self.Ins_delta:] # we keep the paddings at the end
             else:
                 idxs = idxs[::-1]
-        x = IntervalBoundedTensor(x, x, x)  # make x: Tensor as a IntervalBoundedTensor
+        x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
 
         def compute_state(h, c, x_t, mask_t, unk_mask_t):
             if not self.baseline:
@@ -629,7 +629,7 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
-            for i in range(T):
+            for i in idxs:
                 # identity
                 del_extend = None
                 ins_extend = None
