@@ -578,7 +578,7 @@ class LSTMDP(nn.Module):
         idxs = list(range(T))
         if reverse:
             if self.Ins_delta > 0:
-                idxs = idxs[:-self.Ins_delta][::-1] + idxs[-self.Ins_delta:] # we keep the paddings at the end
+                idxs = idxs[:-self.Ins_delta][::-1] + idxs[-self.Ins_delta:]  # we keep the paddings at the end
             else:
                 idxs = idxs[::-1]
         x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
@@ -629,7 +629,7 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
-            for i in idxs:
+            for idxs_idx, i in enumerate(idxs):
                 # identity
                 del_extend = None
                 ins_extend = None
@@ -655,10 +655,13 @@ class LSTMDP(nn.Module):
                                            unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)
 
                     for j in range(1, self.deltas_p1[1]):
-                        if i >= j * 2:
-                            del_extend_t = del_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
-                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None,
-                                                     unk_mask[:, i - j].unsqueeze(-1) if unk_mask is not None else None)
+                        if idxs_idx >= j * 2:
+                            del_extend_t = del_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :],
+                                                     x[:, idxs[idxs_idx - j], :],
+                                                     mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                         -1) if mask is not None else None,
+                                                     unk_mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                         -1) if unk_mask is not None else None)
                             del_extend = tuple([cat([s, t], dim=1) for s, t in zip(del_extend, del_extend_t)])
                         else:
                             del_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in del_extend])
@@ -671,22 +674,23 @@ class LSTMDP(nn.Module):
                                                None)
                     ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                     for j in range(1, self.deltas_p1[1]):
-                        if i < j * 2 - 1:
+                        if idxs_idx < j * 2 - 1:
                             # e.g., when i = 2 and j = 2, it is not possible to have 2 Ins before (including) i = 2
                             ins_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in ins_extend])
                             continue
-                        if i < j * 2:  # if j Ins's have already been done, then we start with i - j
+                        if idxs_idx < j * 2:  # if j Ins's have already been done, then we start with i - j
                             ins_t_extend = None
                         else:
                             ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d),
-                                                         c[:, j, :, :, :].reshape(-1, d), x[:, i - j, :],
-                                                         mask[:, i - j].unsqueeze(-1) if mask is not None else None,
-                                                         None)
+                                                         c[:, j, :, :, :].reshape(-1, d), x[:, idxs[idxs_idx - j], :],
+                                                         mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                             -1) if mask is not None else None, None)
 
                         # if j - 1 Ins's have already been done, we dup it
                         ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d),
-                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, i - j, :],
-                                                mask[:, i - j].unsqueeze(-1) if mask is not None else None, None)
+                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, idxs[idxs_idx - j], :],
+                                                mask[:, idxs[idxs_idx - j]].unsqueeze(-1) if mask is not None else None,
+                                                None)
                         ins_t_extend = view(merge(ins_t_extend, ins_t_1) if ins_t_extend is not None else ins_t_1,
                                             self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
                         ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
@@ -710,10 +714,11 @@ class LSTMDP(nn.Module):
                                            mask[:, i].unsqueeze(-1) if mask is not None else None)
 
                     for j in range(1, self.deltas_p1[1]):
-                        if i >= j * 2:
-                            sub_extend_t = sub_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :], x[:, i - j, :],
-                                                     output[:, i - j, :],
-                                                     mask[:, i - j].unsqueeze(-1) if mask is not None else None)
+                        if idxs_idx >= j * 2:
+                            sub_extend_t = sub_ins_j(h[:, j:j + 1, :, :, :], c[:, j:j + 1, :, :, :],
+                                                     x[:, idxs[idxs_idx - j], :], output[:, idxs[idxs_idx - j], :],
+                                                     mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                         -1) if mask is not None else None)
                             sub_extend = tuple([cat([s, t], dim=1) for s, t in zip(sub_extend, sub_extend_t)])
                         else:
                             sub_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in sub_extend])
