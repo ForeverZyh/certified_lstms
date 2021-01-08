@@ -578,7 +578,7 @@ class LSTMDP(nn.Module):
         idxs = list(range(T))
         if reverse:
             if self.Ins_delta > 0:
-                idxs = idxs[:-self.Ins_delta:-1] + idxs[-self.Ins_delta:] # we keep the paddings at the end
+                idxs = idxs[:-self.Ins_delta][::-1] + idxs[-self.Ins_delta:] # we keep the paddings at the end
             else:
                 idxs = idxs[::-1]
         x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
