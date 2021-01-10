@@ -216,15 +216,15 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
       }
       if augmenter:
         dev_stats['aug_acc'] = dev_results['aug_acc']
-      if dev_results['clean_acc'] > all_epoch_stats['acc']['best_dev']['clean'][-1]['clean_acc']:
+      if dev_results['clean_acc'] >= all_epoch_stats['acc']['best_dev']['clean'][-1]['clean_acc']:
         all_epoch_stats['acc']['best_dev']['clean'].append(dev_stats)
         if cert_frac == 0.0 and not augmenter:
           is_best = True
-      if dev_results['cert_acc'] > all_epoch_stats['acc']['best_dev']['cert'][-1]['cert_acc']:
+      if dev_results['cert_acc'] >= all_epoch_stats['acc']['best_dev']['cert'][-1]['cert_acc']:
         all_epoch_stats['acc']['best_dev']['cert'].append(dev_stats)
         if cert_frac > 0.0:
           is_best = True
-      if augmenter and dev_results['aug_acc'] > all_epoch_stats['acc']['best_dev']['aug'][-1]['aug_acc']:
+      if augmenter and dev_results['aug_acc'] >= all_epoch_stats['acc']['best_dev']['aug'][-1]['aug_acc']:
         all_epoch_stats['acc']['best_dev']['aug'].append(dev_stats)
         if cert_frac == 0.0 and augmenter:
           is_best = True
