@@ -833,6 +833,7 @@ class ExhaustiveAdversary(Adversary):
                 x, dataset.vocab, device, return_bounds=True,
                 attack_surface=self.attack_surface, perturbation=self.perturbation)
             orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
+            assert orig_lb - 1e-5 <= orig_pred <= orig_ub + 1e-5
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
             print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
                 orig_lb, orig_pred, orig_ub, cert_correct))
