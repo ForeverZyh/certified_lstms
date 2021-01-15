@@ -615,7 +615,7 @@ class LSTMDP(nn.Module):
 
         ans = []
         if self.baseline:
-            for i in range(T):
+            for i in idxs:
                 post_state = compute_state(h, c, output[:, i, :],
                                            mask[:, i].unsqueeze(-1) if mask is not None else None,
                                            unk_mask[:, i].unsqueeze(-1) if unk_mask is not None else None)

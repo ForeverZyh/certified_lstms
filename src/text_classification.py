@@ -7,6 +7,7 @@ import os
 import pickle
 import random
 import copy
+import warnings
 
 from nltk import word_tokenize
 import torch
@@ -331,8 +332,9 @@ class LSTMDPModel(AdversarialModel):
         self.hidden_size = hidden_size
         self.word_vec_size = word_vec_size
         self.pool = pool
-        if pool != 'final':
-            raise NotImplementedError("pool = %s is not implemented!" % pool)
+        if pool != 'final' and not baseline:
+            warnings.warn("pool = %s is not implemented! for non length-preserving perturbations" % pool,
+                          RuntimeWarning)
         self.no_wordvec_layer = no_wordvec_layer
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
