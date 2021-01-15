@@ -8,6 +8,7 @@ import pickle
 import random
 import copy
 import warnings
+import math
 
 from nltk import word_tokenize
 import torch
@@ -730,27 +731,44 @@ class RSAdversary(Adversary):
 
     def run(self, model, dataset, device, opts=None):
         is_correct = []
+        delta = np.sqrt(math.log(2 / opts.RS_MC_error) / 2 / opts.RS_sample_num)
         for x, y in tqdm(dataset.raw_data):
             words = x.split()
             choices = self.attack_surface.get_swaps(words)
 
             correct = 0
-            total_sample = 0
-            for batch_x in RSAdversary.RandomSubWord(self.deltas[2], words, choices, sample_num=opts.RS_sample_num):
+            total_size, f = RSAdversary.cal_total_size(self.deltas[2], words, choices)
+            if total_size <= opts.RS_sample_num:
+                iter = ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=50)
+                total_sample = total_size
+            else:
+                iter = RSAdversary.RandomSubWord(self.deltas[2], words, choices, f, sample_num=opts.RS_sample_num)
+                total_sample = opts.RS_sample_num
+            tem_tv = self.attack_surface.get_tv(words)
+
+            for batch_x in iter:
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
-                total_sample += len(all_raw)
                 correct += len([p for p in preds if p * (2 * y - 1) > 0])
+                # early stopping to speed up (about 2X)
+                if total_sample == total_size:
+                    if correct > 0.5 * total_sample:
+                        break
+                else:
+                    if correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) > 0.5 + delta:
+                        break
 
-            tem_tv = self.attack_surface.get_tv(words)
-            is_correct.append(
-                correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) >= 0.5 + opts.RS_MC_error)
+            if total_sample == total_size:
+                is_correct.append(correct > 0.5 * total_sample)
+            else:
+                is_correct.append(
+                    correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) > 0.5 + delta)
             print(is_correct[-1], "\tcert%=", correct / total_sample * 1.0)
 
-        return is_correct
+        return is_correct, []
 
     @staticmethod
-    def RandomSubWord(c, x, choices, sample_num=5000, batch_size=50):
+    def cal_total_size(c, x, choices):
         end_pos = len(x)
         f = np.zeros((end_pos + 1, c + 1), dtype=np.int64)
         f[0, 0] = 1
@@ -760,29 +778,33 @@ class RSAdversary(Adversary):
                 f[i, j] = f[i - 1, j] + f[i - 1, j - 1] * len(choices[i - 1])
 
         total_size = np.sum(f[-1])
-        if total_size <= sample_num:
-            for X in ExhaustiveAdversary.DelDupSubWord(0, 0, c, x, choices, batch_size=batch_size):
-                yield X
-        else:
-            X = []
-            for _ in range(0, sample_num, batch_size):
-                rand_numbers = np.random.randint(0, total_size, batch_size)
-                for rand_number in rand_numbers:
-                    x1 = copy.copy(x)
-                    j = 0
-                    while f[-1, j] < rand_number:
-                        rand_number -= f[-1, j]
-                        j += 1
-                    for i in range(end_pos, 0, -1):
-                        if j == 0:
-                            break
-                        if rand_number > f[i - 1, j]:
-                            rand_number -= f[i - 1, j]
-                            x1[i - 1] = choices[i - 1][rand_number // f[i - 1, j - 1]]
-                            rand_number %= f[i - 1, j - 1]
-                            j -= 1
+        return total_size, f
 
-                    X.append(x1)
+    @staticmethod
+    def RandomSubWord(c, x, choices, f, sample_num=5000, batch_size=50):
+        end_pos = len(x)
+        total_size = np.sum(f[-1])
+        X = []
+        for _ in range(0, sample_num, batch_size):
+            rand_numbers = np.random.randint(0, total_size, batch_size)
+            for rand_number in rand_numbers:
+                x1 = copy.copy(x)
+                j = 0
+                while f[-1, j] <= rand_number:
+                    rand_number -= f[-1, j]
+                    j += 1
+                for i in range(end_pos, 0, -1):
+                    if j == 0:
+                        break
+                    if rand_number >= f[i - 1, j]:
+                        rand_number -= f[i - 1, j]
+                        x1[i - 1] = choices[i - 1][rand_number // f[i - 1, j - 1]]
+                        rand_number %= f[i - 1, j - 1]
+                        j -= 1
+
+                X.append(x1)
+            yield X
+            X = []
 
 
 class HotFlipAdversary(Adversary):
