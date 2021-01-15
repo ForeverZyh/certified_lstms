@@ -720,10 +720,73 @@ class Adversary(object):
         raise NotImplementedError
 
 
-class HotFlipAdversary(Adversary):
-    """An Adversary that exhaustively tries all allowed perturbations.
+class RSAdversary(Adversary):
+    """An Adversary that uses RS to test the random smoothing accuracy.
+    """
 
-    Only practical for short sentences.
+    def __init__(self, attack_surface, perturbation):
+        super(RSAdversary, self).__init__(attack_surface)
+        self.deltas = Perturbation.str2deltas(perturbation)
+
+    def run(self, model, dataset, device, opts=None):
+        is_correct = []
+        for x, y in tqdm(dataset.raw_data):
+            words = x.split()
+            choices = self.attack_surface.get_swaps(words)
+
+            correct = 0
+            total_sample = 0
+            for batch_x in RSAdversary.RandomSubWord(self.deltas[2], words, choices, sample_num=opts.RS_sample_num):
+                all_raw = [' '.join(x_new) for x_new in batch_x]
+                preds = model.query(all_raw, dataset.vocab, device)
+                total_sample += len(all_raw)
+                correct += len([p for p in preds if p * (2 * y - 1) > 0])
+
+            tem_tv = self.attack_surface.get_tv(words)
+            is_correct.append(
+                correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) >= 0.5 + opts.RS_MC_error)
+            print(is_correct[-1], "\tcert%=", correct / total_sample * 1.0)
+
+        return is_correct
+
+    @staticmethod
+    def RandomSubWord(c, x, choices, sample_num=5000, batch_size=50):
+        end_pos = len(x)
+        f = np.zeros((end_pos + 1, c + 1), dtype=np.int64)
+        f[0, 0] = 1
+        for i in range(1, end_pos + 1):
+            f[i, 0] = f[i - 1, 0]
+            for j in range(1, c + 1):
+                f[i, j] = f[i - 1, j] + f[i - 1, j - 1] * len(choices[i - 1])
+
+        total_size = np.sum(f[-1])
+        if total_size <= sample_num:
+            for X in ExhaustiveAdversary.DelDupSubWord(0, 0, c, x, choices, batch_size=batch_size):
+                yield X
+        else:
+            X = []
+            for _ in range(0, sample_num, batch_size):
+                rand_numbers = np.random.randint(0, total_size, batch_size)
+                for rand_number in rand_numbers:
+                    x1 = copy.copy(x)
+                    j = 0
+                    while f[-1, j] < rand_number:
+                        rand_number -= f[-1, j]
+                        j += 1
+                    for i in range(end_pos, 0, -1):
+                        if j == 0:
+                            break
+                        if rand_number > f[i - 1, j]:
+                            rand_number -= f[i - 1, j]
+                            x1[i - 1] = choices[i - 1][rand_number // f[i - 1, j - 1]]
+                            rand_number %= f[i - 1, j - 1]
+                            j -= 1
+
+                    X.append(x1)
+
+
+class HotFlipAdversary(Adversary):
+    """An Adversary that uses HotFlip to search for worst case perturbations.
     """
 
     def __init__(self, victim_model, perturbation, tree_attack=False):
@@ -1221,6 +1284,8 @@ def load_datasets(device, opts):
                 opts.neighbor_file, opts.imdb_lm_file)
         elif opts.use_a3t_settings:
             attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(opts.pddb_file, opts.use_fewer_sub)
+        elif opts.use_RS_settings:
+            attack_surface = attacks.RSAttackSurface.from_files()
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')
