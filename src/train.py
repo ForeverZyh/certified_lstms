@@ -17,7 +17,7 @@ import vocabulary
 from perturbation import Perturbation
 from victim_model_wrapper import ModelWrapper
 from DSL.general_HotFlip import GeneralHotFlipAttack
-from DSL.transformation import Ins, Del, Sub
+from DSL.transformation import Ins, Del, Sub, SubImdb
 
 
 # Maps string keys to modules that hold the relevant functions for training against
