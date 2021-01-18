@@ -4,6 +4,7 @@ import json
 import sys
 import os
 import numpy as np
+import pickle
 
 from nltk import pos_tag
 
@@ -128,3 +129,57 @@ class LMConstrainedAttackSurface(AttackSurface):
       else:
         swaps.append([])
     return swaps
+
+class RSAttackSurface(AttackSurface):
+  """RSAttackSurface"""
+  def __init__(self, counterfitted_tv, neighbors):
+    self.counterfitted_tv = counterfitted_tv
+    self.neighbors = neighbors
+
+  @classmethod
+  def from_files(cls):
+    pkl_file = open("data/imdb_neighbor_constraint_pca0.8.pkl", "rb")
+    data_neighbor = pickle.load(pkl_file)
+    pkl_file.close()
+    pkl_file = open("data/imdb_perturbation_constraint_pca0.8_100.pkl", 'rb')
+    perturb_pca = pickle.load(pkl_file)
+    pkl_file.close()
+
+    data_neighbor = data_neighbor['neighbor']
+    counterfitted_tv = {}
+    for key in data_neighbor.keys():
+      if not key in perturb_pca.keys():
+        counterfitted_tv[key] = 1
+      elif perturb_pca[key]['isdivide'] == 0:
+        counterfitted_tv[key] = 1
+      else:
+        key_neighbor = data_neighbor[key]
+        cur_min = 10.
+        num_perb = len(perturb_pca[key]['set'])
+        for neighbor in key_neighbor:
+          num_inter_perb = len(list(set(perturb_pca[neighbor]['set']).intersection(set(perturb_pca[key]['set']))))
+          tem_min = num_inter_perb / num_perb
+          if tem_min < cur_min:
+            cur_min = tem_min
+        counterfitted_tv[key] = cur_min
+
+    return cls(counterfitted_tv, perturb_pca)
+
+  def get_swaps(self, words):
+    swaps = []
+    words = [word.lower() for word in words]
+    for i in range(len(words)):
+      if words[i] in self.neighbors:
+        swaps.append(self.neighbors[words[i]]["set"])
+      else:
+        swaps.append([])
+    return swaps
+
+  def get_tv(self, words):
+    tv_list = np.zeros(len(words))
+    for j in range(len(words)):
+      if words[j] in self.counterfitted_tv:
+        tv_list[j] = self.counterfitted_tv[words[j]]
+      else:
+        tv_list[j] = 1.
+    return np.sort(tv_list)

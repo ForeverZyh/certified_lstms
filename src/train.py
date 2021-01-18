@@ -17,7 +17,7 @@ import vocabulary
 from perturbation import Perturbation
 from victim_model_wrapper import ModelWrapper
 from DSL.general_HotFlip import GeneralHotFlipAttack
-from DSL.transformation import Ins, Del, Sub
+from DSL.transformation import Ins, Del, Sub, SubImdb
 
 
 # Maps string keys to modules that hold the relevant functions for training against
@@ -350,13 +350,14 @@ def parse_args():
   parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
   parser.add_argument('--baseline', action='store_true', help="Do baseline robust training, i.e., delta=infty")
   # Adversary
-  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic', 'hotflip'],
+  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic', 'hotflip', "RS"],
                       default=None, help='Which adversary to test on')
   parser.add_argument('--adv-num-epochs', type=int, default=10)
   parser.add_argument('--adv-num-tries', type=int, default=2)
   parser.add_argument('--adv-pop-size', type=int, default=60)
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
+  parser.add_argument('--use-RS-settings', action='store_true', help='Use random smoothing settings for substitution')
   parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
   parser.add_argument('--perturbation', type=str, default=None,
                       help='Perturbation for IBP training & exhaustive testing')
@@ -365,6 +366,9 @@ def parse_args():
                       help='Perturbation for hotflip adv training & hotflip adv testing')
   parser.add_argument('--use-random-aug', action='store_true', help='Random sample from the perturbation space')
   parser.add_argument('--adv-beam', type=int, default=5, help='HotFlip attack (test) beam size')
+  parser.add_argument('--RS-sample-num', type=int, default=5000, help='Random Smoothing number of samples')
+  parser.add_argument('--RS-MC-error', type=float, default=0.01,
+                      help='Monte Carlo Error based on concentration inequality')
   # Training
   parser.add_argument('--num-epochs', '-T', type=int, default=1)
   parser.add_argument('--learning-rate', '-r', type=float, default=1e-3)
@@ -474,6 +478,8 @@ def main():
   elif OPTS.adversary == "hotflip":
     victim_model = ModelWrapper(model, train_data.vocab, device)
     adversary = task_class.HotFlipAdversary(victim_model, OPTS.adv_perturbation)
+  elif OPTS.adversary == "RS":
+    adversary = task_class.RSAdversary(attack_surface, OPTS.perturbation)
 
   if not OPTS.adv_only:
     train_results = test(task_class, model, 'Train', train_data, device,

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import os
+import pickle
 
 from nltk import pos_tag
 
@@ -77,6 +78,33 @@ class Sub(Transformation):
             if t == pos_tagging:
                 new_ipt = ipt[:start_pos] + [w] + ipt[end_pos:]
                 yield new_ipt
+
+
+class SubImdb(Transformation):
+    def __init__(self):
+        """
+        Init Sub transformation
+        Sub substitutes one word with its synonym.
+        """
+        pkl_file = open("data/imdb_perturbation_constraint_pca0.8_100.pkl", 'rb')
+        perturb_pca = pickle.load(pkl_file)
+        pkl_file.close()
+        self.neighbors = perturb_pca
+        super(SubImdb, self).__init__()
+
+    def get_pos(self, ipt):
+        ret = []
+        for (start_pos, x) in enumerate(ipt):
+            if x in self.neighbors:
+                ret.append((start_pos, start_pos + 1))
+
+        return ret
+
+    def transformer(self, ipt, start_pos, end_pos):
+        x = ipt[start_pos]
+        for w in self.neighbors[x]["set"]:
+            new_ipt = ipt[:start_pos] + [w] + ipt[end_pos:]
+            yield new_ipt
 
 
 class Del(Transformation):
