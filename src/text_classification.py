@@ -745,17 +745,23 @@ class RSAdversary(Adversary):
                 iter = RSAdversary.RandomSubWord(self.deltas[2], words, choices, f, sample_num=opts.RS_sample_num)
                 total_sample = opts.RS_sample_num
             tem_tv = self.attack_surface.get_tv(words)
+            remaining = total_sample
 
             for batch_x in iter:
                 all_raw = [' '.join(x_new) for x_new in batch_x]
                 preds = model.query(all_raw, dataset.vocab, device)
                 correct += len([p for p in preds if p * (2 * y - 1) > 0])
+                remaining -= len(all_raw)
                 # early stopping to speed up (about 2X)
                 if total_sample == total_size:
                     if correct > 0.5 * total_sample:
                         break
+                    if correct + remaining < 0.5 * total_sample:
+                        break
                 else:
                     if correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) > 0.5 + delta:
+                        break
+                    if (correct + remaining) / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) < 0.5 + delta:
                         break
 
             if total_sample == total_size:
@@ -763,7 +769,8 @@ class RSAdversary(Adversary):
             else:
                 is_correct.append(
                     correct / total_sample * 1.0 - 1. + np.prod(tem_tv[:self.deltas[2]]) > 0.5 + delta)
-            print(is_correct[-1], "\tcert%=", correct / total_sample * 1.0)
+            print(is_correct[-1], ",\tcert%=", correct / total_sample * 1.0, ",\ttotal sample=", total_sample,
+                  ",\tearly stopping at", correct, "/", total_sample - remaining)
 
         return is_correct, []
 
