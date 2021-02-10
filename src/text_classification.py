@@ -907,6 +907,44 @@ class HotFlipAdversary(Adversary):
         return is_correct, adv_exs
 
 
+class EvalAdversary(Adversary):
+    """Evaluating the size of the perturbation space
+    """
+
+    def __init__(self, attack_surface, perturbation):
+        super(EvalAdversary, self).__init__(attack_surface)
+        self.perturbation = perturbation
+        self.deltas = Perturbation.str2deltas(perturbation)
+
+    def run(self, model, dataset, device, opts=None):
+        size = []
+        for x, y in tqdm(dataset.raw_data):
+            words = x.split()
+            swaps = self.attack_surface.get_swaps(words)
+            choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
+
+            end_pos = len(words)
+            f = np.zeros((end_pos + 1, self.deltas[0] + 1, self.deltas[1] + 1, self.deltas[2] + 1), dtype=np.int64)
+            f[0, 0, 0, 0] = 1
+            for i in range(1, end_pos + 1):
+                for cnt_del in range(self.deltas[0] + 1):
+                    for cnt_ins in range(self.deltas[1] + 1):
+                        for cnt_sub in range(self.deltas[2] + 1):
+                            f[i, cnt_del, cnt_ins, cnt_sub] = f[i - 1, cnt_del, cnt_ins, cnt_sub]
+                            if cnt_del > 0 and words[i - 1] in {"a", "and", "the", "of", "to"}:
+                                f[i, cnt_del, cnt_ins, cnt_sub] += f[i - 1, cnt_del - 1, cnt_ins, cnt_sub]
+                            if cnt_ins > 0:
+                                f[i, cnt_del, cnt_ins, cnt_sub] += f[i - 1, cnt_del, cnt_ins - 1, cnt_sub]
+                            if cnt_sub > 0 and len(choices[i - 1]) > 0:
+                                f[i, cnt_del, cnt_ins, cnt_sub] += f[i - 1, cnt_del, cnt_ins, cnt_sub - 1] * len(
+                                    choices[i - 1])
+
+            size.append(np.sum(f[-1]))
+
+        print("Average: ", np.mean(size), "\tMax: ", np.max(size), "\tMin: ", np.min(size))
+        return [0], []
+
+
 class ExhaustiveAdversary(Adversary):
     """An Adversary that exhaustively tries all allowed perturbations.
 

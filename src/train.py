@@ -350,7 +350,7 @@ def parse_args():
   parser.add_argument('--no-bidirectional', action='store_true', help="Don't do bidirectional LSTM")
   parser.add_argument('--baseline', action='store_true', help="Do baseline robust training, i.e., delta=infty")
   # Adversary
-  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic', 'hotflip', "RS"],
+  parser.add_argument('--adversary', '-a', choices=['exhaustive', 'greedy', 'genetic', 'hotflip', "RS", "eval_size"],
                       default=None, help='Which adversary to test on')
   parser.add_argument('--adv-num-epochs', type=int, default=10)
   parser.add_argument('--adv-num-tries', type=int, default=2)
@@ -480,6 +480,8 @@ def main():
     adversary = task_class.HotFlipAdversary(victim_model, OPTS.adv_perturbation)
   elif OPTS.adversary == "RS":
     adversary = task_class.RSAdversary(attack_surface, OPTS.perturbation)
+  elif OPTS.adversary == "eval_size":
+    adversary = task_class.EvalAdversary(attack_surface, OPTS.perturbation)
 
   if not OPTS.adv_only:
     train_results = test(task_class, model, 'Train', train_data, device,

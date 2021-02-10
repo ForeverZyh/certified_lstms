@@ -17,7 +17,7 @@ For the comparison between SAFER, please use https://github.com/lushleaf/Structu
 We use conda to setup the virtual environment for Python version and CUDA version. We use Python3.6, and let conda resolve CUDA version conflicts for us. Please install the following packages:
 
 ```
-tensorflow-gpu==1.13.1
+tensorflow==1.13.1
 keras==2.3.1
 tensorflow-datasets==1.3.2
 nltk==3.4
@@ -29,4 +29,4 @@ We also provide the environment of conda packages in `packages.txt`.
 
 ## Experiment
 
-We provide all training scripts in `scripts.txt`. Please use `src/train.py` to train and test LSTM and Bi-LSTM and `src/train_tree_lstm.py` to train Tree-LSTM.
+We provide all training scripts in `scripts.md`. Please use `src/train.py` to train and test LSTM and Bi-LSTM and `src/train_tree_lstm.py` to train Tree-LSTM.
