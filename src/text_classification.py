@@ -733,7 +733,7 @@ class RSAdversary(Adversary):
         is_correct = []
         delta = np.sqrt(math.log(2 / opts.RS_MC_error) / 2 / opts.RS_sample_num)
         for x, y in tqdm(dataset.raw_data):
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             choices = self.attack_surface.get_swaps(words)
 
             correct = 0
@@ -839,7 +839,7 @@ class HotFlipAdversary(Adversary):
                 adv_exs.append(x)
                 continue
 
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             words = [w for w in words if w in dataset.vocab]  # test words can be outside the vocabulary, we omit them
             # chances are that the substituted words are outside the vocabulary due to the pos tags are different from
             # train and dev set. If that happens, the substituted words will be seen as UNK
@@ -919,7 +919,7 @@ class EvalAdversary(Adversary):
     def run(self, model, dataset, device, opts=None):
         size = []
         for x, y in tqdm(dataset.raw_data):
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             swaps = self.attack_surface.get_swaps(words)
             choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
 
@@ -980,7 +980,7 @@ class ExhaustiveAdversary(Adversary):
                 adv_exs.append([])
                 continue
 
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             swaps = self.attack_surface.get_swaps(words)
             choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
 
@@ -1193,7 +1193,7 @@ class GreedyAdversary(Adversary):
                 adv_exs.append(x)
                 continue
             # Now run adversarial search
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             swaps = self.attack_surface.get_swaps(words)
             choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
             found = False
@@ -1268,7 +1268,7 @@ class GeneticAdversary(Adversary):
                 adv_exs.append(x)
                 continue
             # Now run adversarial search
-            words = x.split()
+            words = [x.lower() for x in x.split()]
             swaps = self.attack_surface.get_swaps(words)
             choices = [[w] + cur_swaps for w, cur_swaps in zip(words, swaps)]
             found = False
