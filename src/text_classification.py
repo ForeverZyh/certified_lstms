@@ -1739,7 +1739,7 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
         x_vals = data_util.multi_dim_padded_cat(x_vals, 0).long()
         trans_o = []
         for tran_id in range(length_perturb):
-            if choice_mats[tran_id][0] is None:
+            if choice_mats[tran_id][0] is None or all(x.nelement() == 0 for x in choice_masks[tran_id]):
                 trans_o.append(torch.zeros(B, max_len, 0, 0, 1).long())
             else:
                 trans_o.append(
