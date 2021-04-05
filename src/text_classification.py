@@ -1545,12 +1545,14 @@ class TextClassificationDataset(data_util.ProcessedDataset):
         if downsample_to:
             raw_data = raw_data[downsample_shard * downsample_to:(downsample_shard + 1) * downsample_to]
         examples = []
+        if perturbation is not None:
+            deltas = Perturbation.str2deltas(perturbation)
         for x, y in raw_data:
             all_words = [w.lower() for w in x.split()]
             ins_delta = 0
             if perturbation is not None:
                 perturb = Perturbation(perturbation, all_words, vocab, attack_surface=attack_surface)
-                ins_delta = perturb.deltas[perturb.Ins_idx]
+                ins_delta = deltas[perturb.Ins_idx]
                 choices = perturb.get_output_for_baseline_final_state()
                 choices = [[x for x in choice if x == UNK or x in vocab] for choice in choices]
                 words = perturb.ipt
@@ -1658,10 +1660,10 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
                     for choice in choices[start_pos]:
                         # We give up this choice if any of the words are out of vocab
                         # This can vary between different implementations
-                        if all(choice[j] in vocab for j in range(tran.t)):
-                            phi[-1] = True  # there is a valid choice
-                            for j in range(tran.t):
-                                o[start_pos][j].append(vocab.get_index(choice[j]))
+                        # if all(choice[j] in vocab for j in range(tran.t)):
+                        phi[-1] = True  # there is a valid choice
+                        for j in range(tran.t):
+                            o[start_pos][j].append(vocab.get_index(choice[j]))
 
                 trans_phi.append(torch.tensor(phi, dtype=torch.bool).unsqueeze(0))
                 trans_o_id.append(o)

@@ -147,3 +147,82 @@ class Ins(Transformation):
     def transformer(self, ipt, start_pos, end_pos):
         new_ipt = ipt[:start_pos] + [ipt[start_pos], ipt[start_pos]] + ipt[end_pos:]
         yield new_ipt
+
+
+class Trans1And2(Transformation):
+    def __init__(self, matched_set_type):
+        """
+        Movie review transformation 1 and 2. this is / it is / this ’s / it ’s
+        """
+        super(Trans1And2, self).__init__()
+        assert matched_set_type in [1, 2]
+        if matched_set_type == 1:
+            self.matched_set = {("this", "is"), ("it", "is"), ("this", "'s"), ("it", "'s")}
+        else:
+            self.matched_set = {("the", "movie"), ("the", "film"), ("this", "movie"), ("this", "film"), ("a", "movie"),
+                                ("a", "film"), ("the", "movies"), ("the", "films"), ("these", "movies"),
+                                ("these", "films")}
+
+    def get_pos(self, ipt):
+        return [(x, x + 2) for x in range(len(ipt) - 1) if (ipt[x], ipt[x + 1]) in self.matched_set]
+
+    def transformer(self, ipt, start_pos, end_pos):
+        if (ipt[start_pos], ipt[start_pos + 1]) in self.matched_set:
+            for x in self.matched_set:
+                if x != (ipt[start_pos], ipt[start_pos + 1]):
+                    new_ipt = ipt[:start_pos] + list(x) + ipt[end_pos:]
+                    yield new_ipt
+
+
+class Trans1(Trans1And2):
+    def __init__(self):
+        """
+        Movie review transformation 1.
+        """
+        super(Trans1, self).__init__(1)
+
+
+class Trans2(Trans1And2):
+    def __init__(self):
+        """
+        Movie review transformation 2.
+        """
+        super(Trans2, self).__init__(1)
+
+
+class Trans3(Transformation):
+    def __init__(self):
+        """
+        Movie review transformation 3. one of the most -> the most; one of the xxxest -> the xxxest
+        """
+        super(Trans3, self).__init__()
+
+    def get_pos(self, ipt):
+        return [(x, x + 4) for x in range(len(ipt) - 3) if
+                (ipt[x], ipt[x + 1], ipt[x + 2], ipt[x + 3]) == ("one", "of", "the", "most") or (
+                        (ipt[x], ipt[x + 1], ipt[x + 2]) == ("one", "of", "the") and ipt[x + 3][-3:] == "est")]
+
+    def transformer(self, ipt, start_pos, end_pos):
+        if (ipt[start_pos], ipt[start_pos + 1], ipt[start_pos + 2], ipt[start_pos + 3]) == (
+                "one", "of", "the", "most") or (
+                (ipt[start_pos], ipt[start_pos + 1], ipt[start_pos + 2]) == ("one", "of", "the") and ipt[start_pos + 3][
+                                                                                                     -3:] == "est"):
+            new_ipt = ipt[:start_pos] + [ipt[start_pos + 2], ipt[start_pos + 3]] + ipt[end_pos:]
+            yield new_ipt
+
+
+class Trans4(Transformation):
+    def __init__(self):
+        """
+        Movie review transformation 4. !->!!, ?->??
+        """
+        super(Trans4, self).__init__()
+        self.puncs = ["!", "?"]
+
+    def get_pos(self, ipt):
+        return [(x, x + 1) for x in range(len(ipt)) if ipt[x] in self.puncs]
+
+    def transformer(self, ipt, start_pos, end_pos):
+        if ipt[start_pos] in self.puncs:
+            new_ipt = ipt[:start_pos] + [ipt[start_pos], ipt[start_pos]] + ipt[end_pos:]
+            yield new_ipt

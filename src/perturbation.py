@@ -86,13 +86,96 @@ class Del(Transformation):
         return [()]
 
 
+class Trans1And2(Transformation):
+    def __init__(self, ipt, delta, matched_set_type):
+        """
+        Movie review transformation 1 and 2.
+        this is / it is / this ’s / it ’s
+        the/this/a movie/film; the/these movies/films
+        """
+        super(Trans1And2, self).__init__(2, 2, ipt, delta)
+        assert matched_set_type in [1, 2]
+        if matched_set_type == 1:
+            self.matched_set = {("this", "is"), ("it", "is"), ("this", "'s"), ("it", "'s")}
+        else:
+            self.matched_set = {("the", "movie"), ("the", "film"), ("this", "movie"), ("this", "film"), ("a", "movie"),
+                                ("a", "film"), ("the", "movies"), ("the", "films"), ("these", "movies"),
+                                ("these", "films")}
+
+    def phi(self, start_pos):
+        return (self.ipt[start_pos], self.ipt[start_pos + 1]) in self.matched_set
+
+    def transformer(self, start_pos):
+        ret = []
+        if (self.ipt[start_pos], self.ipt[start_pos + 1]) in self.matched_set:
+            for x in self.matched_set:
+                if x != (self.ipt[start_pos], self.ipt[start_pos + 1]):
+                    ret.append(list(x))
+        return ret
+
+
+class Trans1(Trans1And2):
+    def __init__(self, ipt, delta):
+        """
+        Movie review transformation 1.
+        """
+        super(Trans1, self).__init__(ipt, delta, 1)
+
+
+class Trans2(Trans1And2):
+    def __init__(self, ipt, delta):
+        """
+        Movie review transformation 2.
+        """
+        super(Trans2, self).__init__(ipt, delta, 2)
+
+
+class Trans3(Transformation):
+    def __init__(self, ipt, delta):
+        """
+        Movie review transformation 3. one of the most -> the most; one of the xxxest -> the xxxest
+        """
+        super(Trans3, self).__init__(4, 2, ipt, delta)
+
+    def phi(self, start_pos):
+        return (self.ipt[start_pos], self.ipt[start_pos + 1], self.ipt[start_pos + 2], self.ipt[start_pos + 3]) == (
+            "one", "of", "the", "most") or ((self.ipt[start_pos], self.ipt[start_pos + 1], self.ipt[start_pos + 2]) == (
+            "one", "of", "the") and self.ipt[start_pos + 3][-3:] == "est")
+
+    def transformer(self, start_pos):
+        if (self.ipt[start_pos], self.ipt[start_pos + 1], self.ipt[start_pos + 2], self.ipt[start_pos + 3]) == (
+                "one", "of", "the", "most") or (
+                (self.ipt[start_pos], self.ipt[start_pos + 1], self.ipt[start_pos + 2]) == ("one", "of", "the") and
+                self.ipt[start_pos + 3][-3:] == "est"):
+            return [(self.ipt[start_pos + 2], self.ipt[start_pos + 3])]
+        else:
+            return []
+
+
+class Trans4(Transformation):
+    def __init__(self, ipt, delta):
+        """
+        Movie review transformation 4. !->!!, ?->??
+        """
+        super(Trans4, self).__init__(1, 2, ipt, delta)
+        self.puncs = ["!", "?"]
+
+    def phi(self, start_pos):
+        return self.ipt[start_pos] in self.puncs
+
+    def transformer(self, start_pos):
+        if self.ipt[start_pos] in self.puncs:
+            return [self.ipt[start_pos], self.ipt[start_pos]]
+        else:
+            return []
+
+
 class Perturbation:
     Del_idx = 0
     Ins_idx = 1
     Sub_idx = 2
 
     def __init__(self, trans, ipt, vocab, attack_surface=None, stop_words=None):
-        self.deltas = Perturbation.str2deltas(trans)
         trans = eval(trans)
         self.ipt = [w for w in ipt if w in vocab]
         self.trans = []
@@ -109,6 +192,8 @@ class Perturbation:
             elif tran == Ins:
                 self.trans.append(Ins(self.ipt, delta))
                 self.has_ins = delta > 0
+            elif tran in [Trans1, Trans2, Trans3, Trans4]:
+                self.trans.append(tran(self.ipt, delta))
             else:
                 raise NotImplementedError
 
@@ -126,6 +211,8 @@ class Perturbation:
                 trans.append(Del([], delta))
             elif tran == Ins:
                 trans.append(Ins([], delta))
+            elif tran in [Trans1, Trans2, Trans3, Trans4]:
+                trans.append(tran([], delta))
             else:
                 raise NotImplementedError
         return trans, deltas
