@@ -110,7 +110,7 @@ class Trans1And2(Transformation):
         if (self.ipt[start_pos], self.ipt[start_pos + 1]) in self.matched_set:
             for x in self.matched_set:
                 if x != (self.ipt[start_pos], self.ipt[start_pos + 1]):
-                    ret.append(list(x))
+                    ret.append(x)
         return ret
 
 
@@ -165,7 +165,7 @@ class Trans4(Transformation):
 
     def transformer(self, start_pos):
         if self.ipt[start_pos] in self.puncs:
-            return [self.ipt[start_pos], self.ipt[start_pos]]
+            return [(self.ipt[start_pos], self.ipt[start_pos])]
         else:
             return []
 
