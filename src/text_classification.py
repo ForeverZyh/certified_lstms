@@ -547,7 +547,7 @@ class LSTMDPGeneralModel(AdversarialModel):
                 else:
                     return logits
 
-    def forward(self, batch, compute_bounds=True, cert_eps=1.0, analysis_mode=False):
+    def forward(self, batch, compute_bounds=True, cert_eps=1.0):
         """
         Args:
           batch: A batch dict from a TextClassificationDataset with the following keys:
@@ -594,11 +594,7 @@ class LSTMDPGeneralModel(AdversarialModel):
 
         h0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         c0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
-        if analysis_mode:
-            h_mat, c_mat, lstm_analysis, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask,
-                                                                      analysis_mode=True)  # B, n, h each
-        else:
-            h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
+        h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
 
         max_length = h_mat.shape[1]
         if self.pool == 'mean':
@@ -613,7 +609,7 @@ class LSTMDPGeneralModel(AdversarialModel):
                     fc_in[i] = cum_sum / lengths_interval.lb[i].item()
                     for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item()):
                         cum_sum += h_mat[i, j]
-                        fc_in[i] = fc_in[i].merge(cum_sum / j)
+                        fc_in[i] = fc_in[i].merge(cum_sum / (j + 1))
                 fc_in = ibp.stack(fc_in, dim=0)
         elif self.pool == 'final':
             if trans_output is None:
@@ -634,8 +630,6 @@ class LSTMDPGeneralModel(AdversarialModel):
         fc_hidden = ibp.activation(F.relu, self.fc_hidden(fc_in))  # B, h
         fc_hidden = self.dropout(fc_hidden)
         output = self.fc_output(fc_hidden)  # B, 1
-        if analysis_mode:
-            return output, h_mat, c_mat, lstm_analysis
         return output
 
 
@@ -1278,7 +1272,7 @@ class GeneralExhaustiveAdversary(Adversary):
             return
 
         tran, tran_o = perturb[step]
-        for delta in range(tran.delta + 1):
+        for delta in range(tran.delta, -1, -1):
             for o_s in itertools.combinations(tran_o, delta):
                 # check for non-overlapping
                 if any(np.any(covered[o[0]: tran.s + o[0]]) for o in o_s):
@@ -1290,7 +1284,8 @@ class GeneralExhaustiveAdversary(Adversary):
                 tran_res_choices = [o[1] for o in o_s]
                 for tran_reses in itertools.product(*tran_res_choices):
                     appended_trace = [(o[0], tran.s + o[0], tran_res) for o, tran_res in zip(o_s, tran_reses)]
-                    for x in GeneralExhaustiveAdversary.gen_all(ipt, step + 1, perturb, trace + appended_trace, post_covered):
+                    for x in GeneralExhaustiveAdversary.gen_all(ipt, step + 1, perturb, trace + appended_trace,
+                                                                post_covered):
                         yield x
 
 
@@ -1492,7 +1487,8 @@ def load_datasets(device, opts):
             raw_data = data_class.get_raw_data(opts.sst2_dir, test=opts.test)
         else:
             raise NotImplementedError
-        word_set = raw_data.get_word_set(attack_surface, use_counter_vocab=not opts.use_a3t_settings and not opts.use_none_settings)
+        word_set = raw_data.get_word_set(attack_surface,
+                                         use_counter_vocab=not opts.use_a3t_settings and not opts.use_none_settings)
         vocab, word_mat = vocabulary.Vocabulary.read_word_vecs(word_set, opts.glove_dir, opts.glove, device)
         if opts.model == "lstm-dp-general":
             train_data = TextClassificationDatasetGeneral.from_raw_data(raw_data.train_data, vocab, attack_surface,

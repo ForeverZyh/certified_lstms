@@ -852,7 +852,7 @@ class LSTMDPGeneral(nn.Module):
             return h_seq, c_seq, i_seq, f_seq, o_seq, length
         return h_seq, c_seq, length
 
-    def _processDP(self, _trans_output: tuple, h, c, x, i2h, h2h, length, mask=None, analysis_mode=False):
+    def _processDP(self, _trans_output: tuple, h, c, x, i2h, h2h, length, mask=None):
         """
         A general DP
         :param _trans_output: a tuple (trans_o, trans_phi)
@@ -866,7 +866,6 @@ class LSTMDPGeneral(nn.Module):
         :param i2h: input to hidden linear layer
         :param h2h: hidden to hidden linear layer
         :param mask: mask for the input sequence (B, T)
-        :param analysis_mode: do we need to return intermediary results
         :return: a list of hidden states in the interval bound form and a possible length interval
         """
         trans_o, trans_phi = _trans_output
@@ -883,17 +882,12 @@ class LSTMDPGeneral(nn.Module):
         length_ub = [-1] * B
 
         def compute_state(h, c, x_t, mask_t):
-            if analysis_mode:
-                h_t, c_t, i_t, f_t, o_t = self._step(h, c, x_t, i2h, h2h, analysis_mode=True)
-            else:
-                h_t, c_t = self._step(h, c, x_t, i2h, h2h)
+            h_t, c_t = self._step(h, c, x_t, i2h, h2h)
             if mask_t is not None:
                 # Don't update h or c when mask is 0
                 h_t = h_t * mask_t + h * (1.0 - mask_t)
                 c_t = c_t * mask_t + c * (1.0 - mask_t)
 
-            if analysis_mode:
-                return h_t, c_t, i_t, f_t, o_t
             return h_t, c_t
 
         def cal_in_pos(out_pos, deltas):
@@ -903,16 +897,23 @@ class LSTMDPGeneral(nn.Module):
                 in_pos += (tran.s - tran.t) * delta
             return in_pos
 
-        # a feasible set of states (B, *self.deltas_p1)
-        feasible = torch.zeros(B, *self.deltas_p1).bool().to(self.device)
+        def mask_by_feasible(feasible_mask, overapp_cur_states, defaults):
+            return (where(feasible_mask.unsqueeze(-1), overapp_cur_states[0], defaults[0]),
+                    where(feasible_mask.unsqueeze(-1), overapp_cur_states[1], defaults[1]))
+
+        # a feasible set of states (max_out_len + 1, B, *self.deltas_p1)
+        feasible = torch.zeros(max_out_len + 1, B, *self.deltas_p1).bool().to(self.device)
         all_zeros = (0,) * len(self.deltas_p1)
-        feasible[(slice(None),) + all_zeros] = 1
+        # Caution! A dangerous assumption: we use feasible[-1] to denote the actual -1 index instead of the last one,
+        # What's why we make the length of feasible max_out_len + 1
+        feasible[(-1, slice(None),) + all_zeros] = 1
         ans = []
         len_cur_states = np.prod(self.deltas_p1)
         state2id = {}
         for state_id, deltas in enumerate(product(*self.deltas_ranges)):
             state2id[deltas] = state_id
         cur_states = [(IntervalBoundedTensor.point(h), IntervalBoundedTensor.point(c))] + [None] * (len_cur_states - 1)
+        bottom_h_size_like = IntervalBoundedTensor.bottom_like(h)
         for i in range(max_out_len + 1):  # + 1 make sure the last state is added.
             # cur_states should read as pre_states here.
             for state_id, deltas in enumerate(product(*self.deltas_ranges)):
@@ -924,19 +925,21 @@ class LSTMDPGeneral(nn.Module):
                         pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
                         # the input position for pre_deltas
                         in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
-                        if 0 <= in_pos < T and torch.any(
-                                feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos]):
-                            cur_states[state_id] = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
-                            feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas] | (
-                                    feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos])
+                        if 0 <= in_pos < T:
+                            feasible_mask = feasible[(i - 1, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos]
+                            if feasible_mask.any().item():
+                                merge_cur_states = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
+                                cur_states[state_id] = mask_by_feasible(feasible_mask, merge_cur_states,
+                                                                        cur_states[state_id])
+                                feasible[(i - 1, slice(None),) + deltas] |= feasible_mask
 
             # update ans and h, c
-            cur_states_ret = [[] for _ in range(len(cur_states[0]))]
+            cur_states_ret = [[], []]
             cur_ans = None
             for cur_state in cur_states:
                 cur_ans = merge(cur_ans, cur_state)
                 for j in range(len(cur_states_ret)):
-                    cur_states_ret[j].append(cur_state[j] if cur_state is not None else cur_states[0][j])
+                    cur_states_ret[j].append(cur_state[j] if cur_state is not None else bottom_h_size_like)
 
             for j in range(len(cur_states_ret)):
                 cur_states_ret[j] = stack(cur_states_ret[j], dim=0)
@@ -949,13 +952,12 @@ class LSTMDPGeneral(nn.Module):
                 for s_id in range(B):
                     for deltas in product(*self.deltas_ranges):
                         in_pos = cal_in_pos(i - 1, deltas)
-                        if in_pos == length[s_id].item() - 1 and feasible[(s_id,) + deltas].item():
+                        if in_pos == length[s_id].item() - 1 and feasible[(i - 1, s_id,) + deltas].item():
                             length_ub[s_id] = i
                             if length_lb[s_id] == -1:
                                 length_lb[s_id] = i
 
             # calculate cur_states by DP
-            cur_feasible = torch.zeros_like(feasible)
             cur_states = []
             for deltas in product(*self.deltas_ranges):
                 _in_pos = cal_in_pos(i, deltas)
@@ -963,44 +965,42 @@ class LSTMDPGeneral(nn.Module):
                 # Case 1: do not transform at this position
                 cur_state = None
                 # _in_pos cannot exceed T
-                if feasible[(slice(None),) + deltas].any().item() and 0 <= _in_pos < T:
-                    cur_state = compute_state(h[deltas], c[deltas], x[:, _in_pos, :], mask[:, _in_pos, :])
-                    cur_feasible[(slice(None),) + deltas] = feasible[(slice(None),) + deltas]
+                feasible_mask = feasible[(i - 1, slice(None),) + deltas]
+                if feasible_mask.any().item() and 0 <= _in_pos < T:
+                    cur_state = mask_by_feasible(feasible_mask,
+                                                 compute_state(h[deltas], c[deltas], x[:, _in_pos, :],
+                                                               mask[:, _in_pos, :]),
+                                                 (bottom_h_size_like, bottom_h_size_like))
+                    feasible[(i, slice(None),) + deltas] = feasible_mask
 
                 # Case 2: let's enumerate a transformation
                 for tran_id, tran in enumerate(self.perturbation):
                     if deltas[tran_id] > 0 and tran.t > 0:
                         pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
-                        if feasible[(slice(None),) + pre_deltas].any().item():
-                            # the input position for pre_deltas
-                            in_pos = _in_pos - (tran.s - tran.t)
-                            for j in range(tran.t):
-                                # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
-                                if 0 <= in_pos - j < T and torch.any(
-                                        feasible[(slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]):
-                                    cur_h, cur_c = compute_state(h[pre_deltas], c[pre_deltas],
-                                                                 trans_o[tran_id][:, in_pos - j, j, :], None)
-                                    # cur_h, cur_c have the shape (B, h_size)
-                                    cur_h = where(trans_phi[tran_id][:, in_pos - j].unsqueeze(-1), cur_h, h[all_zeros])
-                                    cur_c = where(trans_phi[tran_id][:, in_pos - j].unsqueeze(-1), cur_c, c[all_zeros])
-                                    cur_state = merge(cur_state, (cur_h, cur_c))
-                                    cur_feasible[(slice(None),) + deltas] |= feasible[(slice(None),) + pre_deltas] & \
-                                                                             trans_phi[tran_id][:, in_pos - j]
+                        # the input position for pre_deltas
+                        in_pos = _in_pos - (tran.s - tran.t)
+                        for j in range(tran.t):
+                            # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
+                            if 0 <= in_pos - j < T:
+                                feasible_mask = feasible[(i - 1 - j, slice(None),) + pre_deltas] & \
+                                                trans_phi[tran_id][:, in_pos - j]
+                                if feasible_mask.any().item():
+                                    masked_cur_state = mask_by_feasible(feasible_mask,
+                                                                        compute_state(h[pre_deltas], c[pre_deltas],
+                                                                                      trans_o[tran_id][:,
+                                                                                      in_pos - j, j, :], None),
+                                                                        (bottom_h_size_like, bottom_h_size_like))
+                                    cur_state = merge(cur_state, masked_cur_state)
+                                    if j == tran.t - 1:
+                                        feasible[(i, slice(None),) + deltas] |= feasible_mask
 
-                if cur_state is not None:
-                    cur_states.append(cur_state)
-                else:
-                    if len(cur_states) == 0:  # if the 0-state is invalid, then we are going to end the DP process.
-                        break
-                    cur_states.append(cur_states[0])
+                cur_states.append(cur_state)
 
             # if feasible is not updated, then the DP process is over.
             # some may doubt that we need to break after considering tran.t == 0, but the longest perturbed sentences
             # cannot take any such transformation.
-            if not cur_feasible.any().item():
+            if not feasible[i].any().item():
                 break
-
-            feasible = cur_feasible
 
         ret = [[] for _ in range(len(ans[0]))]
         for i in range(len(ans)):
@@ -1010,7 +1010,7 @@ class LSTMDPGeneral(nn.Module):
         assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
         return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long(), torch.Tensor(length_ub).long())]
 
-    def forward(self, x, trans_output, s0, length, mask=None, analysis_mode=False):
+    def forward(self, x, trans_output, s0, length, mask=None):
         """Forward pass of LSTM
 
         Args:
@@ -1023,19 +1023,10 @@ class LSTMDPGeneral(nn.Module):
             process = self._process
         else:
             process = partial(self._processDP, trans_output)
-        if analysis_mode:
-            h_seq, c_seq, i_seq, f_seq, o_seq, length_interval = process(
-                h0, c0, x, self.i2h, self.h2h, length, mask=mask, analysis_mode=True)
-        else:
-            h_seq, c_seq, length_interval = process(h0, c0, x, self.i2h, self.h2h, length, mask=mask)
+        h_seq, c_seq, length_interval = process(h0, c0, x, self.i2h, self.h2h, length, mask=mask)
 
         h_mat = stack(h_seq, dim=1)  # list of (B, d) -> (B, T, d)
         c_mat = stack(c_seq, dim=1)  # list of (B, d) -> (B, T, d)
-        if analysis_mode:
-            i_mat = stack(i_seq, dim=1)
-            f_mat = stack(f_seq, dim=1)
-            o_mat = stack(o_seq, dim=1)
-            return h_mat, c_mat, (i_mat, f_mat, o_mat), length_interval
         return h_mat, c_mat, length_interval
 
 
