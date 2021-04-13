@@ -1841,7 +1841,7 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
                     trans_o.append(torch.zeros(1, examples[0]["lengths"], 0, 0, 1).long())
                 else:
                     trans_o.append(o)
-            return {'x': examples[0]["x"], 'trans_output': (trans_o, list_phi), 'y': examples[0]["x"],
+            return {'x': examples[0]["x"], 'trans_output': (trans_o, list_phi), 'y': examples[0]["y"],
                     'mask': examples[0]["mask"], 'lengths': examples[0]["lengths"]}
         B = len(examples)
         max_len = max(ex['x'].shape[1] for ex in examples)
