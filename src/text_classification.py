@@ -595,37 +595,35 @@ class LSTMDPGeneralModel(AdversarialModel):
         h0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         c0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
-
-        max_length = h_mat.shape[1]
-        if self.pool == 'mean':
-            if trans_output is None:
+        if trans_output is None:
+            if self.pool == 'mean':
                 h_masked = h_mat * mask.unsqueeze(2)  # only need to mask the state sequence
                 fc_in = ibp.sum(h_masked / lengths.to(dtype=torch.float).view(-1, 1, 1), 1)  # B, h
-            else:
-                fc_in = [None] * B
-                for i in range(B):
-                    assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
-                    cum_sum = ibp.sum(h_mat[i, :lengths_interval.lb[i].item()], 0)
-                    fc_in[i] = cum_sum / lengths_interval.lb[i].item()
-                    for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item()):
-                        cum_sum += h_mat[i, j]
-                        fc_in[i] = fc_in[i].merge(cum_sum / (j + 1))
-                fc_in = ibp.stack(fc_in, dim=0)
-        elif self.pool == 'final':
-            if trans_output is None:
+            elif self.pool == 'final':
                 fc_in = h_mat[:, -1, :]  # B, h
             else:
-                fc_in = [None] * B
-                for i in range(B):
-                    assert lengths_interval.lb[i].item() <= lengths[i].item() <= lengths_interval.ub[i].item()
-                    for j in range(lengths_interval.lb[i].item() - 1, lengths_interval.ub[i].item()):
-                        if fc_in[i] is None:
-                            fc_in[i] = h_mat[i, j]
-                        else:
-                            fc_in[i] = fc_in[i].merge(h_mat[i, j])
-                fc_in = ibp.stack(fc_in, dim=0)
+                raise NotImplementedError()
         else:
-            raise NotImplementedError()
+            length_lb, length_ub = lengths_interval
+            if self.pool == 'mean':
+                assert length_lb <= lengths[0].item() <= length_ub
+                cum_sum = ibp.sum(h_mat[0, :length_lb], 0)
+                fc_in = cum_sum / length_lb
+                for j in range(length_lb, length_ub):
+                    cum_sum += h_mat[0, j]
+                    fc_in = fc_in.merge(cum_sum / (j + 1))
+                fc_in = fc_in.unsqueeze(0)
+            elif self.pool == 'final':
+                assert length_lb <= lengths[0].item() <= length_ub
+                fc_in = None
+                for j in range(length_lb - 1, length_ub):
+                    if fc_in is None:
+                        fc_in = h_mat[0, j]
+                    else:
+                        fc_in = fc_in.merge(h_mat[0, j])
+                fc_in = fc_in.unsqueeze(0)
+            else:
+                raise NotImplementedError()
         fc_in = self.dropout(fc_in)
         fc_hidden = ibp.activation(F.relu, self.fc_hidden(fc_in))  # B, h
         fc_hidden = self.dropout(fc_hidden)

@@ -262,6 +262,174 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   return model
 
 
+def train_general(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
+          cert_frac=0.0, initial_cert_frac=0.0, cert_eps=1.0, initial_cert_eps=0.0, non_cert_train_epochs=0, full_train_epochs=0,
+          batch_size=1, epochs_per_save=1, clip_grad_norm=0, weight_decay=0,
+          save_best_only=False, attack_surface=None):
+  print('Training model')
+  sys.stdout.flush()
+  loss_func = task_class.LOSS_FUNC
+  loss_func_keep_dim = task_class.LOSS_FUNC_KEEP_DIM
+  optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+  zero_stats = {'epoch': 0, 'clean_acc': 0.0, 'cert_acc': 0.0}
+  all_epoch_stats = {
+    "loss": {"total": [],
+             "clean": [],
+             "cert": []},
+    "cert": {"frac": [],
+             "eps": []},
+    "acc": {
+      "train": {
+        "clean": [],
+        "cert": []},
+      "dev": {
+        "clean": [],
+        "cert": []},
+      "best_dev": {
+        "clean": [zero_stats],
+        "cert": [zero_stats]}},
+    "total_epochs": num_epochs,
+  }
+  data = train_data.get_loader(1)  # Create all batches now and pin them in memory
+  # Linearly increase the weight of adversarial loss over all the epochs to end up at the final desired fraction
+  cert_schedule = torch.tensor(np.linspace(initial_cert_frac, cert_frac, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
+  eps_schedule = torch.tensor(np.linspace(initial_cert_eps, cert_eps, num_epochs - full_train_epochs - non_cert_train_epochs), dtype=torch.float, device=device)
+  pre_best = -1
+  for t in range(num_epochs):
+    model.train()
+    if t < non_cert_train_epochs:
+        cur_cert_frac = 0.0
+        cur_cert_eps = 0.0
+    else:
+        cur_cert_frac = cert_schedule[t - non_cert_train_epochs] if t - non_cert_train_epochs < len(cert_schedule) else cert_schedule[-1]
+        cur_cert_eps = eps_schedule[t - non_cert_train_epochs] if t - non_cert_train_epochs < len(eps_schedule) else eps_schedule[-1]
+    epoch = {
+      "total_loss": 0.0,
+      "clean_loss": 0.0,
+      "cert_loss": 0.0,
+      "num_correct": 0,
+      "num_cert_correct": 0,
+      "num": 0,
+      "clean_acc": 0,
+      "cert_acc": 0,
+      "dev": {},
+      "best_dev": {},
+      "cert_frac": cur_cert_frac if isinstance(cur_cert_frac, float) else cur_cert_frac.item(),
+      "cert_eps": cur_cert_eps if isinstance(cur_cert_eps, float) else cur_cert_eps.item(),
+      "epoch": t,
+    }
+    with tqdm(data) as batch_loop:
+      seen_examples_in_batch = 0
+      ori_loss = 0
+      cert_loss = 0
+      for batch_idx, batch in enumerate(batch_loop):
+        batch = data_util.dict_batch_to_device(batch, device)
+        ##### begin #####
+        if seen_examples_in_batch == 0:
+          optimizer.zero_grad()
+        #####  mid  #####
+        if cur_cert_frac > 0.0:
+          out = model.forward(batch, cert_eps=cur_cert_eps)
+          logits = out.val
+          ori_loss += loss_func(logits, batch['y'])
+          cert_loss += torch.max(loss_func(out.lb, batch['y']),
+                               loss_func(out.ub, batch['y']))
+        else:
+          # Bypass computing bounds during training
+          logits = out = model.forward(batch, compute_bounds=False)
+          ori_loss += loss_func(logits, batch['y'])
+        seen_examples_in_batch += 1
+        #####  end  #####
+        if seen_examples_in_batch != batch_size and batch_idx != len(data) - 1:
+          continue
+        if cur_cert_frac > 0.0:
+          epoch["clean_loss"] += ori_loss.item()
+          loss = cur_cert_frac * cert_loss + (1.0 - cur_cert_frac) * ori_loss
+          epoch["cert_loss"] += cert_loss.item()
+        else:
+          loss = ori_loss
+
+        epoch["total_loss"] += loss.item()
+        epoch["num"] += len(batch['y'])
+        num_correct, num_cert_correct = task_class.num_correct(out, batch['y'])
+        epoch["num_correct"] += num_correct
+        epoch["num_cert_correct"] += num_cert_correct
+        loss.backward()
+        if any(p.grad is not None and torch.isnan(p.grad).any() for p in model.parameters()):
+          nan_params = [p.name for p in model.parameters() if p.grad is not None and torch.isnan(p.grad).any()]
+          print('NaN found in gradients: %s' % nan_params, file=sys.stderr)
+        else:
+          if clip_grad_norm:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+          optimizer.step()
+        seen_examples_in_batch = 0
+        ori_loss = 0
+        cert_loss = 0
+      if cert_frac > 0.0:
+        print("Epoch {epoch:>3}: train loss: {total_loss:.6f}, clean_loss: {clean_loss:.6f}, cert_loss: {cert_loss:.6f}".format(**epoch))
+      else:
+        print("Epoch {epoch:>3}: train loss: {total_loss:.6f}".format(**epoch))
+      sys.stdout.flush()
+
+    epoch["clean_acc"] = 100.0 * epoch["num_correct"] / epoch["num"]
+    acc_str = "  Train accuracy: {num_correct}/{num} = {clean_acc:.2f}".format(**epoch)
+    if cert_frac > 0.0:
+      epoch["cert_acc"] = 100.0 * epoch["num_cert_correct"] / epoch["num"]
+      acc_str += ", certified {num_cert_correct}/{num} = {cert_acc:.2f}".format(**epoch)
+    print(acc_str)
+    is_best = False
+    if dev_data:
+      dev_results = test(task_class, model, "Dev", dev_data, device, batch_size=batch_size,
+                          attack_surface=attack_surface)
+      epoch['dev'] = dev_results
+      all_epoch_stats['acc']['dev']['clean'].append(dev_results['clean_acc'])
+      all_epoch_stats['acc']['dev']['cert'].append(dev_results['cert_acc'])
+      dev_stats = {
+          'epoch': t,
+          'loss': dev_results['loss'],
+          'clean_acc': dev_results['clean_acc'],
+          'cert_acc': dev_results['cert_acc']
+      }
+      if dev_results['clean_acc'] >= all_epoch_stats['acc']['best_dev']['clean'][-1]['clean_acc']:
+        all_epoch_stats['acc']['best_dev']['clean'].append(dev_stats)
+        if cert_frac == 0.0:
+          is_best = True
+      if dev_results['cert_acc'] >= all_epoch_stats['acc']['best_dev']['cert'][-1]['cert_acc']:
+        all_epoch_stats['acc']['best_dev']['cert'].append(dev_stats)
+        if cert_frac > 0.0:
+          is_best = True
+      epoch['best_dev'] = {
+              'clean': all_epoch_stats['acc']['best_dev']['clean'][-1],
+              'cert': all_epoch_stats['acc']['best_dev']['cert'][-1]}
+
+    all_epoch_stats["loss"]['total'].append(epoch["total_loss"])
+    all_epoch_stats["loss"]['clean'].append(epoch["clean_loss"])
+    all_epoch_stats["loss"]['cert'].append(epoch["cert_loss"])
+    all_epoch_stats['cert']['frac'].append(epoch["cert_frac"])
+    all_epoch_stats['cert']['eps'].append(epoch["cert_eps"])
+    all_epoch_stats["acc"]['train']['clean'].append(epoch["clean_acc"])
+    all_epoch_stats["acc"]['train']['cert'].append(epoch["cert_acc"])
+    with open(os.path.join(OPTS.out_dir, "run_stats.json"), "w") as outfile:
+      json.dump(epoch, outfile)
+    with open(os.path.join(OPTS.out_dir, "all_epoch_stats.json"), "w") as outfile:
+      json.dump(all_epoch_stats, outfile)
+    if OPTS.early_stopping is not None:
+      if is_best:
+        pre_best = t
+      elif t - pre_best >= OPTS.early_stopping:
+        break
+    if ((save_best_only and is_best)
+        or (not save_best_only and epochs_per_save and (t+1) % epochs_per_save == 0)
+        or t == num_epochs - 1):
+      if save_best_only and is_best:
+        for fn in glob.glob(os.path.join(OPTS.out_dir, 'model-checkpoint*.pth')):
+          os.remove(fn)
+      model_save_path = os.path.join(OPTS.out_dir, "model-checkpoint-{}.pth".format(t))
+      print('Saving model to %s' % model_save_path)
+      torch.save(model.state_dict(), model_save_path)
+
+  return model
+
 def test(task_class, model, name, dataset, device, show_certified=False, batch_size=1,
          adversary=None, aug_dataset=None, attack_surface=None):
   model.eval()
@@ -460,11 +628,20 @@ def main():
     augmenter = None
     if OPTS.augment_by:
       augmenter = task_class.DataAugmenter(OPTS.augment_by)
-    train(task_class, model, train_data, OPTS.num_epochs, OPTS.learning_rate, device,
-          dev_data=dev_data, cert_frac=OPTS.cert_frac, initial_cert_frac=OPTS.initial_cert_frac,
-          cert_eps=OPTS.cert_eps, initial_cert_eps=OPTS.initial_cert_eps, batch_size=OPTS.batch_size,
-          epochs_per_save=OPTS.epochs_per_save, augmenter=augmenter, clip_grad_norm=OPTS.clip_grad_norm,
-          weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs, non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only, attack_surface=attack_surface)
+    if OPTS.model == "lstm-dp-general":
+      train_general(task_class, model, train_data, OPTS.num_epochs, OPTS.learning_rate, device,
+            dev_data=dev_data, cert_frac=OPTS.cert_frac, initial_cert_frac=OPTS.initial_cert_frac,
+            cert_eps=OPTS.cert_eps, initial_cert_eps=OPTS.initial_cert_eps, batch_size=OPTS.batch_size,
+            epochs_per_save=OPTS.epochs_per_save, clip_grad_norm=OPTS.clip_grad_norm,
+            weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs,
+            non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only,
+            attack_surface=attack_surface)
+    else:
+      train(task_class, model, train_data, OPTS.num_epochs, OPTS.learning_rate, device,
+            dev_data=dev_data, cert_frac=OPTS.cert_frac, initial_cert_frac=OPTS.initial_cert_frac,
+            cert_eps=OPTS.cert_eps, initial_cert_eps=OPTS.initial_cert_eps, batch_size=OPTS.batch_size,
+            epochs_per_save=OPTS.epochs_per_save, augmenter=augmenter, clip_grad_norm=OPTS.clip_grad_norm,
+            weight_decay=OPTS.weight_decay, full_train_epochs=OPTS.full_train_epochs, non_cert_train_epochs=OPTS.non_cert_train_epochs, save_best_only=OPTS.save_best_only, attack_surface=attack_surface)
     print('Training finished.')
   print('Testing model.')
   adversary = None

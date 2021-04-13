@@ -854,22 +854,24 @@ class LSTMDPGeneral(nn.Module):
 
     def _processDP(self, _trans_output: tuple, h, c, x, i2h, h2h, length, mask=None):
         """
-        A general DP
+        A general DP (single example propagation)
         :param _trans_output: a tuple (trans_o, trans_phi)
-        trans_o is a list of interval bound tensors, each of which has the shape (B, T, tran.t, word_vec_size / h_size).
+        trans_o is a list of interval bound tensors, each of which has the shape (1, T, tran.t, word_vec_size / h_size).
         trans_o[tran_id][:, i, j, :] means that trans[tran_id] matches at the input positions
         i ~ (i + trans[tran_id].s - 1), how the j-th output of trans[id] can be. (j = 0 ~ trans[tran_id].t - 1).
-        trans_phi is a list of bool tensors, each of which has the shape (B, T).
+        trans_phi is a list of bool tensors, each of which has the shape (1, T).
         :param h: hidden states
         :param c: cell states
-        :param x: input sequence (B, T, word_vec_size or h_size)
+        :param x: input sequence (1, T, word_vec_size or h_size)
         :param i2h: input to hidden linear layer
         :param h2h: hidden to hidden linear layer
-        :param mask: mask for the input sequence (B, T)
+        :param length: length of the input (1)
+        :param mask: mask for the input sequence (1, T)
         :return: a list of hidden states in the interval bound form and a possible length interval
         """
         trans_o, trans_phi = _trans_output
         B, T, _ = x.shape  # batch_first=True
+        T = length[0].item()
         max_out_len = T
         for delta, tran in zip(self.deltas, self.perturbation):
             if tran.t > tran.s:
@@ -878,8 +880,8 @@ class LSTMDPGeneral(nn.Module):
         d = self.hidden_size
         D = len(self.deltas)
         x = IntervalBoundedTensor.point(x)  # make x: Tensor as a IntervalBoundedTensor
-        length_lb = [-1] * B
-        length_ub = [-1] * B
+        length_lb = -1
+        length_ub = -1
 
         def compute_state(h, c, x_t, mask_t):
             h_t, c_t = self._step(h, c, x_t, i2h, h2h)
@@ -897,16 +899,16 @@ class LSTMDPGeneral(nn.Module):
                 in_pos += (tran.s - tran.t) * delta
             return in_pos
 
-        def mask_by_feasible(feasible_mask, overapp_cur_states, defaults):
-            return (where(feasible_mask.unsqueeze(-1), overapp_cur_states[0], defaults[0]),
-                    where(feasible_mask.unsqueeze(-1), overapp_cur_states[1], defaults[1]))
+        # def mask_by_feasible(feasible_mask, overapp_cur_states, defaults):
+        #     return (where(feasible_mask.unsqueeze(-1), overapp_cur_states[0], defaults[0]),
+        #             where(feasible_mask.unsqueeze(-1), overapp_cur_states[1], defaults[1]))
 
-        # a feasible set of states (max_out_len + 1, B, *self.deltas_p1)
-        feasible = torch.zeros(max_out_len + 1, B, *self.deltas_p1).bool().to(self.device)
+        # a feasible set of states (max_out_len + 1, *self.deltas_p1)
+        feasible = torch.zeros(max_out_len + 1, *self.deltas_p1).bool().to(self.device)
         all_zeros = (0,) * len(self.deltas_p1)
         # Caution! A dangerous assumption: we use feasible[-1] to denote the actual -1 index instead of the last one,
         # What's why we make the length of feasible max_out_len + 1
-        feasible[(-1, slice(None),) + all_zeros] = 1
+        feasible[(-1,) + all_zeros] = 1
         ans = []
         len_cur_states = np.prod(self.deltas_p1)
         state2id = {}
@@ -925,14 +927,10 @@ class LSTMDPGeneral(nn.Module):
                         pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
                         # the input position for pre_deltas
                         in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
-                        if 0 <= in_pos < T:
-                            feasible_mask = feasible[(i - 1, slice(None),) + pre_deltas] & trans_phi[tran_id][:,
-                                                                                           in_pos] & (in_pos < length)
-                            if feasible_mask.any().item():
-                                merge_cur_states = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
-                                cur_states[state_id] = mask_by_feasible(feasible_mask, merge_cur_states,
-                                                                        cur_states[state_id])
-                                feasible[(i - 1, slice(None),) + deltas] |= feasible_mask
+                        if 0 <= in_pos < T and feasible[(i - 1,) + pre_deltas].item() and trans_phi[tran_id][0,
+                                                                                                             in_pos].item():
+                            cur_states[state_id] = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
+                            feasible[(i - 1,) + deltas] = 1
 
             # update ans and h, c
             cur_states_ret = [[], []]
@@ -950,13 +948,12 @@ class LSTMDPGeneral(nn.Module):
                 ans.append(cur_ans)
                 # calculate the possible length of each sentence, the length_lb and ub are not related to the NN
                 # parameters. In other words, it is ok to decouple them from the gradient descent process.
-                for s_id in range(B):
-                    for deltas in product(*self.deltas_ranges):
-                        in_pos = cal_in_pos(i - 1, deltas)
-                        if in_pos == length[s_id].item() - 1 and feasible[(i - 1, s_id,) + deltas].item():
-                            length_ub[s_id] = i
-                            if length_lb[s_id] == -1:
-                                length_lb[s_id] = i
+                for deltas in product(*self.deltas_ranges):
+                    in_pos = cal_in_pos(i - 1, deltas)
+                    if in_pos == length[0].item() - 1 and feasible[(i - 1,) + deltas].item():
+                        length_ub = i
+                        if length_lb == -1:
+                            length_lb = i
 
             # calculate cur_states by DP
             cur_states = []
@@ -966,13 +963,9 @@ class LSTMDPGeneral(nn.Module):
                 # Case 1: do not transform at this position
                 cur_state = None
                 # _in_pos cannot exceed T
-                feasible_mask = feasible[(i - 1, slice(None),) + deltas] & (_in_pos < length)
-                if feasible_mask.any().item() and 0 <= _in_pos < T:
-                    cur_state = mask_by_feasible(feasible_mask,
-                                                 compute_state(h[deltas], c[deltas], x[:, _in_pos, :],
-                                                               mask[:, _in_pos, :]),
-                                                 (bottom_h_size_like, bottom_h_size_like))
-                    feasible[(i, slice(None),) + deltas] = feasible_mask
+                if feasible[(i - 1,) + deltas].item() and 0 <= _in_pos < T:
+                    cur_state = compute_state(h[deltas], c[deltas], x[:, _in_pos, :], mask[:, _in_pos, :])
+                    feasible[(i,) + deltas] = 1
 
                 # Case 2: let's enumerate a transformation
                 for tran_id, tran in enumerate(self.perturbation):
@@ -982,18 +975,14 @@ class LSTMDPGeneral(nn.Module):
                         in_pos = _in_pos - (tran.s - tran.t)
                         for j in range(tran.t):
                             # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
-                            if 0 <= in_pos - j < T:
-                                feasible_mask = (in_pos - j < length) & feasible[
-                                    (i - 1 - j, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]
-                                if feasible_mask.any().item():
-                                    masked_cur_state = mask_by_feasible(feasible_mask,
-                                                                        compute_state(h[pre_deltas], c[pre_deltas],
-                                                                                      trans_o[tran_id][:,
-                                                                                      in_pos - j, j, :], None),
-                                                                        (bottom_h_size_like, bottom_h_size_like))
-                                    cur_state = merge(cur_state, masked_cur_state)
-                                    if j == tran.t - 1:
-                                        feasible[(i, slice(None),) + deltas] |= feasible_mask
+                            if 0 <= in_pos - j < T and feasible[(i - 1 - j,) + pre_deltas].item() and \
+                                    trans_phi[tran_id][0, in_pos - j].item():
+                                masked_cur_state = compute_state(h[pre_deltas], c[pre_deltas],
+                                                                 trans_o[tran_id][:,
+                                                                 in_pos - j, j, :], None)
+                                cur_state = merge(cur_state, masked_cur_state)
+                                if j == tran.t - 1:
+                                    feasible[(i,) + deltas] = 1
 
                 cur_states.append(cur_state)
 
@@ -1008,8 +997,8 @@ class LSTMDPGeneral(nn.Module):
             for j in range(len(ret)):
                 ret[j].append(ans[i][j])
 
-        assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
-        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long().to(self.device), torch.Tensor(length_ub).long().to(self.device))]
+        assert length_lb > 0 and length_ub > 0 and length_ub == len(ret[0])
+        return ret + [(length_lb, length_ub)]
 
     def forward(self, x, trans_output, s0, length, mask=None):
         """Forward pass of LSTM
