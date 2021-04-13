@@ -149,19 +149,13 @@ class Ins(Transformation):
         yield new_ipt
 
 
-class Trans1And2(Transformation):
-    def __init__(self, matched_set_type):
+class Trans1(Transformation):
+    def __init__(self):
         """
-        Movie review transformation 1 and 2. this is / it is / this ’s / it ’s
+        Movie review transformation 1. this is / it is / this ’s / it ’s
         """
-        super(Trans1And2, self).__init__()
-        assert matched_set_type in [1, 2]
-        if matched_set_type == 1:
-            self.matched_set = {("this", "is"), ("it", "is"), ("this", "'s"), ("it", "'s")}
-        else:
-            self.matched_set = {("the", "movie"), ("the", "film"), ("this", "movie"), ("this", "film"), ("a", "movie"),
-                                ("a", "film"), ("the", "movies"), ("the", "films"), ("these", "movies"),
-                                ("these", "films")}
+        super(Trans1, self).__init__()
+        self.matched_set = {("this", "is"), ("it", "is"), ("this", "'s"), ("it", "'s")}
 
     def get_pos(self, ipt):
         return [(x, x + 2) for x in range(len(ipt) - 1) if (ipt[x], ipt[x + 1]) in self.matched_set]
@@ -174,20 +168,28 @@ class Trans1And2(Transformation):
                     yield new_ipt
 
 
-class Trans1(Trans1And2):
-    def __init__(self):
-        """
-        Movie review transformation 1.
-        """
-        super(Trans1, self).__init__(1)
-
-
-class Trans2(Trans1And2):
+class Trans2(Transformation):
     def __init__(self):
         """
         Movie review transformation 2.
+        the/this/a movie/film; the/these movies/films
         """
-        super(Trans2, self).__init__(1)
+        super(Trans2, self).__init__()
+        self.matched_set = [{("the", "movie"), ("the", "film"), ("this", "movie"), ("this", "film"), ("a", "movie"),
+                             ("a", "film")},
+                            {("the", "movies"), ("the", "films"), ("these", "movies"), ("these", "films")}]
+
+    def get_pos(self, ipt):
+        return [(x, x + 2) for x in range(len(ipt) - 1) if
+                (ipt[x], ipt[x + 1]) in self.matched_set[0] or (ipt[x], ipt[x + 1]) in self.matched_set[1]]
+
+    def transformer(self, ipt, start_pos, end_pos):
+        for i in range(len(self.matched_set)):
+            if (ipt[start_pos], ipt[start_pos + 1]) in self.matched_set[i]:
+                for x in self.matched_set[i]:
+                    if x != (ipt[start_pos], ipt[start_pos + 1]):
+                        new_ipt = ipt[:start_pos] + list(x) + ipt[end_pos:]
+                        yield new_ipt
 
 
 class Trans3(Transformation):

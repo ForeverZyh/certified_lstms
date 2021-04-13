@@ -35,6 +35,20 @@ class WordSubstitutionAttackSurface(AttackSurface):
         swaps.append([])
     return swaps
 
+class NoneAttackSurface(AttackSurface):
+  def __init__(self):
+    pass
+
+  @classmethod
+  def from_file(cls):
+      return cls()
+
+  def get_swaps(self, words):
+    swaps = []
+    for i in range(len(words)):
+      swaps.append([])
+    return swaps
+
 class A3TWordSubstitutionAttackSurface(AttackSurface):
 
   def __init__(self, synonym_dict, synonym_dict_pos_tag):

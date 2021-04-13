@@ -358,6 +358,7 @@ def parse_args():
   parser.add_argument('--use-lm', action='store_true', help='Use LM scores to define attack surface')
   parser.add_argument('--use-a3t-settings', action='store_true', help='Use A3T settings for substitution')
   parser.add_argument('--use-RS-settings', action='store_true', help='Use random smoothing settings for substitution')
+  parser.add_argument('--use-none-settings', action='store_true', help='Do not use substitution')
   parser.add_argument('--use-fewer-sub', action='store_true', help='Use one substitution per word')
   parser.add_argument('--perturbation', type=str, default=None,
                       help='Perturbation for IBP training & exhaustive testing')
@@ -468,7 +469,10 @@ def main():
   print('Testing model.')
   adversary = None
   if OPTS.adversary == 'exhaustive':
-    adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
+    if OPTS.model == "lstm-dp-general":
+      adversary = task_class.GeneralExhaustiveAdversary(attack_surface, OPTS.perturbation)
+    else:
+      adversary = task_class.ExhaustiveAdversary(attack_surface, OPTS.perturbation)
   elif OPTS.adversary == 'greedy':
     adversary = task_class.GreedyAdversary(attack_surface, num_epochs=OPTS.adv_num_epochs,
                                            num_tries=OPTS.adv_num_tries)

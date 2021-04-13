@@ -13,3 +13,9 @@ windweller-l2w
 
 # Swap files
 *.sw*
+
+# caches
+*.json
+*.txt
+*.pth
+*.pkl

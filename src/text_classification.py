@@ -547,7 +547,7 @@ class LSTMDPGeneralModel(AdversarialModel):
                 else:
                     return logits
 
-    def forward(self, batch, compute_bounds=True, cert_eps=1.0, analysis_mode=False):
+    def forward(self, batch, compute_bounds=True, cert_eps=1.0):
         """
         Args:
           batch: A batch dict from a TextClassificationDataset with the following keys:
@@ -594,11 +594,7 @@ class LSTMDPGeneralModel(AdversarialModel):
 
         h0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
         c0 = torch.zeros((B, self.hidden_size), device=self.device)  # B, h
-        if analysis_mode:
-            h_mat, c_mat, lstm_analysis, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask,
-                                                                      analysis_mode=True)  # B, n, h each
-        else:
-            h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
+        h_mat, c_mat, lengths_interval = self.lstm(z, trans_output, (h0, c0), lengths, mask=mask)  # B, n, h each
 
         max_length = h_mat.shape[1]
         if self.pool == 'mean':
@@ -613,7 +609,7 @@ class LSTMDPGeneralModel(AdversarialModel):
                     fc_in[i] = cum_sum / lengths_interval.lb[i].item()
                     for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item()):
                         cum_sum += h_mat[i, j]
-                        fc_in[i] = fc_in[i].merge(cum_sum / j)
+                        fc_in[i] = fc_in[i].merge(cum_sum / (j + 1))
                 fc_in = ibp.stack(fc_in, dim=0)
         elif self.pool == 'final':
             if trans_output is None:
@@ -634,8 +630,6 @@ class LSTMDPGeneralModel(AdversarialModel):
         fc_hidden = ibp.activation(F.relu, self.fc_hidden(fc_in))  # B, h
         fc_hidden = self.dropout(fc_hidden)
         output = self.fc_output(fc_hidden)  # B, 1
-        if analysis_mode:
-            return output, h_mat, c_mat, lstm_analysis
         return output
 
 
@@ -1167,6 +1161,134 @@ class ExhaustiveAdversary(Adversary):
             yield X
 
 
+class GeneralExhaustiveAdversary(Adversary):
+    """An Adversary that exhaustively tries all allowed perturbations.
+
+    Only practical for short sentences.
+    """
+
+    def __init__(self, attack_surface, perturbation):
+        super(GeneralExhaustiveAdversary, self).__init__(attack_surface)
+        self.perturbation = perturbation
+
+    def run(self, model, dataset, device, opts=None):
+        is_correct = []
+        adv_exs = []
+        for x, y in tqdm(dataset.raw_data):
+            # First query the example itself
+            orig_pred, (orig_lb, orig_ub) = model.query(
+                x, dataset.vocab, device, return_bounds=True,
+                attack_surface=self.attack_surface, perturbation=self.perturbation)
+            orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
+            assert orig_lb - 1e-5 <= orig_pred <= orig_ub + 1e-5
+            cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
+            print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
+                orig_lb, orig_pred, orig_ub, cert_correct))
+            if orig_pred * (2 * y - 1) <= 0:
+                print('ORIGINAL PREDICTION WAS WRONG')
+                is_correct.append(0)
+                adv_exs.append(x)
+                continue
+            elif cert_correct:
+                print('CERTIFY CORRECT')
+                is_correct.append(1)
+                adv_exs.append([])
+                continue
+
+            words = [x.lower() for x in x.split()]
+            words = [x for x in words if x in dataset.vocab]
+
+            is_correct_single = True
+            perturb = Perturbation(self.perturbation, words, dataset.vocab, attack_surface=self.attack_surface)
+            for batch_x in GeneralExhaustiveAdversary.gen_batch(words, perturb, batch_size=10):
+                all_raw = [' '.join(x_new) for x_new in batch_x]
+                preds = model.query(all_raw, dataset.vocab, device)
+                if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
+                    print("Fail! ", preds.min(), preds.max())
+                    print("Min: ", all_raw[int(preds.min(dim=0)[1][0])])
+                    print("Max: ", all_raw[int(preds.max(dim=0)[1][0])])
+                    _ = input("Press any key to continue...")
+                cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
+                               if p * (2 * y - 1) <= 0]
+                if len(cur_adv_exs) > 0:
+                    print(cur_adv_exs)
+                    adv_exs.append(cur_adv_exs)
+                    is_correct_single = False
+                    break
+
+            # TODO: count the number
+            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            is_correct.append(is_correct_single)
+            if is_correct_single:
+                adv_exs.append([])
+
+        return is_correct, adv_exs
+
+    @staticmethod
+    def gen_batch(ipt, perturb, batch_size=10):
+        trans_o = []
+        for tran in perturb.trans:
+            tran_o = tran.gen_output_for_dp()
+            ret_o = []
+            for i, o in enumerate(tran_o):
+                if len(o) > 0:
+                    ret_o.append((i, o))
+
+            trans_o.append(ret_o)
+
+        X = []
+        for x in GeneralExhaustiveAdversary.gen_all(ipt, 0, list(zip(perturb.trans, trans_o)), [], np.zeros(len(ipt))):
+            X.append(x)
+            if len(X) == batch_size:
+                yield X
+                X = []
+
+        if len(X) > 0:
+            yield X
+
+    @staticmethod
+    def gen_all(ipt, step, perturb, trace, covered):
+        """
+        generate all perturbations
+        :param ipt: the original input
+        :param step: the current transformation
+        :param perturb: zip of the perturbation spaces and the transform outputs
+        :param trace: a list of (start_pos, end_pos, tran_res)
+        :param covered: a 0-1 array, 0 means not covered yet. To be used checking the non-overlapping
+        :return:
+        """
+        if step == len(perturb):
+            # the end of DFS
+            trace.sort(key=lambda x: x[:2])
+            new_x = []
+            pre = 0
+            for (start_pos, end_pos, tran_res) in trace:
+                new_x += ipt[pre:start_pos]
+                new_x += list(tran_res)
+                pre = end_pos
+            new_x += ipt[pre:]
+
+            yield new_x
+            return
+
+        tran, tran_o = perturb[step]
+        for delta in range(tran.delta, -1, -1):
+            for o_s in itertools.combinations(tran_o, delta):
+                # check for non-overlapping
+                if any(np.any(covered[o[0]: tran.s + o[0]]) for o in o_s):
+                    continue
+                post_covered = np.copy(covered)
+                for o in o_s:
+                    post_covered[o[0]: tran.s + o[0]] = 1
+
+                tran_res_choices = [o[1] for o in o_s]
+                for tran_reses in itertools.product(*tran_res_choices):
+                    appended_trace = [(o[0], tran.s + o[0], tran_res) for o, tran_res in zip(o_s, tran_reses)]
+                    for x in GeneralExhaustiveAdversary.gen_all(ipt, step + 1, perturb, trace + appended_trace,
+                                                                post_covered):
+                        yield x
+
+
 class GreedyAdversary(Adversary):
     """An adversary that picks a random word and greedily tries perturbations."""
 
@@ -1354,6 +1476,8 @@ def load_datasets(device, opts):
             attack_surface = attacks.A3TWordSubstitutionAttackSurface.from_file(opts.pddb_file, opts.use_fewer_sub)
         elif opts.use_RS_settings:
             attack_surface = attacks.RSAttackSurface.from_files()
+        elif opts.use_none_settings:
+            attack_surface = attacks.NoneAttackSurface.from_file()
         else:
             attack_surface = attacks.WordSubstitutionAttackSurface.from_file(opts.neighbor_file)
         print('Reading dataset.')
@@ -1363,7 +1487,8 @@ def load_datasets(device, opts):
             raw_data = data_class.get_raw_data(opts.sst2_dir, test=opts.test)
         else:
             raise NotImplementedError
-        word_set = raw_data.get_word_set(attack_surface, use_counter_vocab=not opts.use_a3t_settings)
+        word_set = raw_data.get_word_set(attack_surface,
+                                         use_counter_vocab=not opts.use_a3t_settings and not opts.use_none_settings)
         vocab, word_mat = vocabulary.Vocabulary.read_word_vecs(word_set, opts.glove_dir, opts.glove, device)
         if opts.model == "lstm-dp-general":
             train_data = TextClassificationDatasetGeneral.from_raw_data(raw_data.train_data, vocab, attack_surface,
@@ -1709,7 +1834,15 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
         Turns a list of examples into a workable batch:
         """
         if len(examples) == 1:
-            return examples[0]
+            list_o, list_phi = examples[0]['trans_output']
+            trans_o = []
+            for o in list_o:
+                if isinstance(o, ibp.DiscreteChoiceTensorTrans) and o.choice_mask.nelement() == 0:
+                    trans_o.append(torch.zeros(1, examples[0]["lengths"], 0, 0, 1).long())
+                else:
+                    trans_o.append(o)
+            return {'x': examples[0]["x"], 'trans_output': (trans_o, list_phi), 'y': examples[0]["x"],
+                    'mask': examples[0]["mask"], 'lengths': examples[0]["lengths"]}
         B = len(examples)
         max_len = max(ex['x'].shape[1] for ex in examples)
         x_vals = []
