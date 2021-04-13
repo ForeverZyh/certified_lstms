@@ -926,7 +926,8 @@ class LSTMDPGeneral(nn.Module):
                         # the input position for pre_deltas
                         in_pos = _in_pos - (tran.s - tran.t) + 1  # out_pos is the pos previous start_pos
                         if 0 <= in_pos < T:
-                            feasible_mask = feasible[(i - 1, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos]
+                            feasible_mask = feasible[(i - 1, slice(None),) + pre_deltas] & trans_phi[tran_id][:,
+                                                                                           in_pos] & (in_pos < length)
                             if feasible_mask.any().item():
                                 merge_cur_states = merge(cur_states[state_id], cur_states[state2id[pre_deltas]])
                                 cur_states[state_id] = mask_by_feasible(feasible_mask, merge_cur_states,
@@ -965,7 +966,7 @@ class LSTMDPGeneral(nn.Module):
                 # Case 1: do not transform at this position
                 cur_state = None
                 # _in_pos cannot exceed T
-                feasible_mask = feasible[(i - 1, slice(None),) + deltas]
+                feasible_mask = feasible[(i - 1, slice(None),) + deltas] & (_in_pos < length)
                 if feasible_mask.any().item() and 0 <= _in_pos < T:
                     cur_state = mask_by_feasible(feasible_mask,
                                                  compute_state(h[deltas], c[deltas], x[:, _in_pos, :],
@@ -982,8 +983,8 @@ class LSTMDPGeneral(nn.Module):
                         for j in range(tran.t):
                             # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
                             if 0 <= in_pos - j < T:
-                                feasible_mask = feasible[(i - 1 - j, slice(None),) + pre_deltas] & \
-                                                trans_phi[tran_id][:, in_pos - j]
+                                feasible_mask = (in_pos - j < length) & feasible[
+                                    (i - 1 - j, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]
                                 if feasible_mask.any().item():
                                     masked_cur_state = mask_by_feasible(feasible_mask,
                                                                         compute_state(h[pre_deltas], c[pre_deltas],
