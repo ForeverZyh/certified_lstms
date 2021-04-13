@@ -910,8 +910,18 @@ class EvalAdversary(Adversary):
 
     def run(self, model, dataset, device, opts=None):
         size = []
+        ngram_start = 2
+        ngram_end = 10
+        ngrams = [{} for _ in range(ngram_end)]
         for x, y in tqdm(dataset.raw_data):
             words = [x.lower() for x in x.split()]
+            if '!' in words or "?" in words:
+                print("here")
+            for i in range(len(words)):
+                for j in range(ngram_start, ngram_end):
+                    if i + j <= len(words):
+                        keys = tuple(words[i: i + j])
+                        ngrams[j][keys] = ngrams[j].setdefault(keys, 0) + 1
             swaps = self.attack_surface.get_swaps(words)
             choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
 
@@ -934,6 +944,11 @@ class EvalAdversary(Adversary):
             size.append(np.sum(f[-1]))
 
         print("Average: ", np.mean(size), "\tMax: ", np.max(size), "\tMin: ", np.min(size))
+        for j in range(ngram_start, ngram_end):
+            ngram_list = list(ngrams[j].items())
+            ngram_list.sort(key=lambda x: -x[1])
+            ngrams[j] = dict(ngram_list[:50])
+        np.save("./EvalSize", ngrams)
         return [0], []
 
 
@@ -988,7 +1003,7 @@ class ExhaustiveAdversary(Adversary):
                 cur_adv_exs = [all_raw[i] for i, p in enumerate(preds)
                                if p * (2 * y - 1) <= 0]
                 if len(cur_adv_exs) > 0:
-                    print(cur_adv_exs)
+                    # print(cur_adv_exs)
                     adv_exs.append(cur_adv_exs)
                     is_correct_single = False
                     break
@@ -1172,6 +1187,7 @@ class GeneralExhaustiveAdversary(Adversary):
     def run(self, model, dataset, device, opts=None):
         is_correct = []
         adv_exs = []
+        sizes = []
         for x, y in tqdm(dataset.raw_data):
             # First query the example itself
             orig_pred, (orig_lb, orig_ub) = model.query(
@@ -1198,8 +1214,10 @@ class GeneralExhaustiveAdversary(Adversary):
 
             is_correct_single = True
             perturb = Perturbation(self.perturbation, words, dataset.vocab, attack_surface=self.attack_surface)
+            cnt_eval = 0
             for batch_x in GeneralExhaustiveAdversary.gen_batch(words, perturb, batch_size=10):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
+                cnt_eval += len(all_raw)
                 preds = model.query(all_raw, dataset.vocab, device)
                 if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
                     print("Fail! ", preds.min(), preds.max())
@@ -1215,11 +1233,16 @@ class GeneralExhaustiveAdversary(Adversary):
                     break
 
             # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            if is_correct_single:
+                print("ExhaustiveAdversary: %s -> all correct, %d samples evaluated." % (x, cnt_eval))
+            else:
+                print("ExhaustiveAdversary: %s -> found wrong example, %d samples evaluated." % (x, cnt_eval))
+            sizes.append(cnt_eval)
             is_correct.append(is_correct_single)
             if is_correct_single:
                 adv_exs.append([])
 
+        print("Max: %d, Mean: %.2f" % (max(sizes), sum(sizes) * 1.0 / len(sizes)))
         return is_correct, adv_exs
 
     @staticmethod
