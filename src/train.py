@@ -444,7 +444,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
       'cert_acc': 0.0,
       'loss': 0.0
   }
-  data = dataset.get_loader(32)
+  data = dataset.get_loader(1)
   aug_deltas = [0, 0, 0] if OPTS.aug_perturbation is None else Perturbation.str2deltas(OPTS.aug_perturbation)
   if OPTS.adv_perturbation is not None:
     attack = GeneralHotFlipAttack(eval(OPTS.adv_perturbation), OPTS.use_random_aug)
