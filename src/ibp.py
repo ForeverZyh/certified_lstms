@@ -1008,7 +1008,7 @@ class LSTMDPGeneral(nn.Module):
                 ret[j].append(ans[i][j])
 
         assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
-        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long(), torch.Tensor(length_ub).long())]
+        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long().to(self.device), torch.Tensor(length_ub).long().to(self.device))]
 
     def forward(self, x, trans_output, s0, length, mask=None, analysis_mode=False):
         """Forward pass of LSTM
