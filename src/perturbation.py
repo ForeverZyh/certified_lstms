@@ -183,6 +183,7 @@ class Perturbation:
         self.trans = []
         self.has_del = False
         self.has_ins = False
+        self.vocab = vocab
         for tran, delta in trans:
             if tran == Sub:
                 assert attack_surface is not None

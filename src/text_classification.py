@@ -609,7 +609,10 @@ class LSTMDPGeneralModel(AdversarialModel):
                     fc_in[i] = cum_sum / lengths_interval.lb[i].item()
                     for j in range(lengths_interval.lb[i].item(), lengths_interval.ub[i].item()):
                         cum_sum += h_mat[i, j]
-                        fc_in[i] = fc_in[i].merge(cum_sum / (j + 1))
+                        if j + 1 == lengths[i].item():
+                            fc_in[i] = (cum_sum / (j + 1)).merge(fc_in[i])
+                        else:
+                            fc_in[i] = fc_in[i].merge(cum_sum / (j + 1))
                 fc_in = ibp.stack(fc_in, dim=0)
         elif self.pool == 'final':
             if trans_output is None:
@@ -622,7 +625,10 @@ class LSTMDPGeneralModel(AdversarialModel):
                         if fc_in[i] is None:
                             fc_in[i] = h_mat[i, j]
                         else:
-                            fc_in[i] = fc_in[i].merge(h_mat[i, j])
+                            if j + 1 == lengths[i].item():
+                                fc_in[i] = h_mat[i, j].merge(fc_in[i])
+                            else:
+                                fc_in[i] = fc_in[i].merge(h_mat[i, j])
                 fc_in = ibp.stack(fc_in, dim=0)
         else:
             raise NotImplementedError()
@@ -912,8 +918,18 @@ class EvalAdversary(Adversary):
 
     def run(self, model, dataset, device, opts=None):
         size = []
+        ngram_start = 2
+        ngram_end = 10
+        ngrams = [{} for _ in range(ngram_end)]
         for x, y in tqdm(dataset.raw_data):
             words = [x.lower() for x in x.split()]
+            if '!' in words or "?" in words:
+                print("here")
+            for i in range(len(words)):
+                for j in range(ngram_start, ngram_end):
+                    if i + j <= len(words):
+                        keys = tuple(words[i: i + j])
+                        ngrams[j][keys] = ngrams[j].setdefault(keys, 0) + 1
             swaps = self.attack_surface.get_swaps(words)
             choices = [[s for s in cur_swaps if s in dataset.vocab] for w, cur_swaps in zip(words, swaps)]
 
@@ -936,6 +952,11 @@ class EvalAdversary(Adversary):
             size.append(np.sum(f[-1]))
 
         print("Average: ", np.mean(size), "\tMax: ", np.max(size), "\tMin: ", np.min(size))
+        for j in range(ngram_start, ngram_end):
+            ngram_list = list(ngrams[j].items())
+            ngram_list.sort(key=lambda x: -x[1])
+            ngrams[j] = dict(ngram_list[:50])
+        np.save("./EvalSize", ngrams)
         return [0], []
 
 
@@ -1166,7 +1187,7 @@ class GeneralExhaustiveAdversary(Adversary):
 
     Only practical for short sentences.
     """
-
+    vocab = None
     def __init__(self, attack_surface, perturbation):
         super(GeneralExhaustiveAdversary, self).__init__(attack_surface)
         self.perturbation = perturbation
@@ -1174,12 +1195,15 @@ class GeneralExhaustiveAdversary(Adversary):
     def run(self, model, dataset, device, opts=None):
         is_correct = []
         adv_exs = []
+        sizes = []
+        GeneralExhaustiveAdversary.vocab = dataset.vocab
         for x, y in tqdm(dataset.raw_data):
             # First query the example itself
-            orig_pred, (orig_lb, orig_ub) = model.query(
+            orig_pred_, (orig_lb, orig_ub) = model.query(
                 x, dataset.vocab, device, return_bounds=True,
                 attack_surface=self.attack_surface, perturbation=self.perturbation)
             orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
+            assert abs(orig_pred_ - orig_pred) < 1e-5
             assert orig_lb - 1e-5 <= orig_pred <= orig_ub + 1e-5
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
             print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
@@ -1196,12 +1220,14 @@ class GeneralExhaustiveAdversary(Adversary):
                 continue
 
             words = [x.lower() for x in x.split()]
-            words = [x for x in words if x in dataset.vocab]
 
             is_correct_single = True
             perturb = Perturbation(self.perturbation, words, dataset.vocab, attack_surface=self.attack_surface)
+            words = perturb.ipt
+            cnt_eval = 0
             for batch_x in GeneralExhaustiveAdversary.gen_batch(words, perturb, batch_size=10):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
+                cnt_eval += len(all_raw)
                 preds = model.query(all_raw, dataset.vocab, device)
                 if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
                     print("Fail! ", preds.min(), preds.max())
@@ -1217,11 +1243,16 @@ class GeneralExhaustiveAdversary(Adversary):
                     break
 
             # TODO: count the number
-            print('ExhaustiveAdversary: "%s" -> %d options' % (x, is_correct_single))
+            if is_correct_single:
+                print("ExhaustiveAdversary: %s -> all correct, %d samples evaluated." % (x, cnt_eval))
+            else:
+                print("ExhaustiveAdversary: %s -> found wrong example, %d samples evaluated." % (x, cnt_eval))
+            sizes.append(cnt_eval)
             is_correct.append(is_correct_single)
             if is_correct_single:
                 adv_exs.append([])
 
+        print("Max: %d, Mean: %.2f" % (max(sizes), sum(sizes) * 1.0 / len(sizes)))
         return is_correct, adv_exs
 
     @staticmethod
@@ -1283,6 +1314,9 @@ class GeneralExhaustiveAdversary(Adversary):
 
                 tran_res_choices = [o[1] for o in o_s]
                 for tran_reses in itertools.product(*tran_res_choices):
+                    if any(any(w not in GeneralExhaustiveAdversary.vocab for w in tran_res) for tran_res in tran_reses):
+                        continue
+
                     appended_trace = [(o[0], tran.s + o[0], tran_res) for o, tran_res in zip(o_s, tran_reses)]
                     for x in GeneralExhaustiveAdversary.gen_all(ipt, step + 1, perturb, trace + appended_trace,
                                                                 post_covered):
@@ -1785,10 +1819,10 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
                     for choice in choices[start_pos]:
                         # We give up this choice if any of the words are out of vocab
                         # This can vary between different implementations
-                        # if all(choice[j] in vocab for j in range(tran.t)):
-                        phi[-1] = True  # there is a valid choice
-                        for j in range(tran.t):
-                            o[start_pos][j].append(vocab.get_index(choice[j]))
+                        if all(choice[j] in vocab for j in range(tran.t)):
+                            phi[-1] = True  # there is a valid choice
+                            for j in range(tran.t):
+                                o[start_pos][j].append(vocab.get_index(choice[j]))
 
                 trans_phi.append(torch.tensor(phi, dtype=torch.bool).unsqueeze(0))
                 trans_o_id.append(o)
@@ -1841,7 +1875,7 @@ class TextClassificationDatasetGeneral(data_util.ProcessedDataset):
                     trans_o.append(torch.zeros(1, examples[0]["lengths"], 0, 0, 1).long())
                 else:
                     trans_o.append(o)
-            return {'x': examples[0]["x"], 'trans_output': (trans_o, list_phi), 'y': examples[0]["x"],
+            return {'x': examples[0]["x"], 'trans_output': (trans_o, list_phi), 'y': examples[0]["y"],
                     'mask': examples[0]["mask"], 'lengths': examples[0]["lengths"]}
         B = len(examples)
         max_len = max(ex['x'].shape[1] for ex in examples)
