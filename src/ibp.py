@@ -868,6 +868,7 @@ class LSTMDPGeneral(nn.Module):
         :param mask: mask for the input sequence (B, T)
         :return: a list of hidden states in the interval bound form and a possible length interval
         """
+        global DEBUG
         trans_o, trans_phi = _trans_output
         B, T, _ = x.shape  # batch_first=True
         max_out_len = T
@@ -898,6 +899,7 @@ class LSTMDPGeneral(nn.Module):
             return in_pos
 
         def mask_by_feasible(feasible_mask, overapp_cur_states, defaults):
+            DEBUG = True
             return (where(feasible_mask.unsqueeze(-1), overapp_cur_states[0], defaults[0]),
                     where(feasible_mask.unsqueeze(-1), overapp_cur_states[1], defaults[1]))
 
@@ -986,6 +988,7 @@ class LSTMDPGeneral(nn.Module):
                                 feasible_mask = (in_pos - j < length) & feasible[
                                     (i - 1 - j, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]
                                 if feasible_mask.any().item():
+                                    DEBUG = False
                                     masked_cur_state = mask_by_feasible(feasible_mask,
                                                                         compute_state(h[pre_deltas], c[pre_deltas],
                                                                                       trans_o[tran_id][:,
