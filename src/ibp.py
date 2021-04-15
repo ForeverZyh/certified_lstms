@@ -977,12 +977,13 @@ class LSTMDPGeneral(nn.Module):
                     feasible[(i, slice(None),) + deltas] = feasible_mask
 
                 # Case 2: let's enumerate a transformation
+                # Case 2-1: if it is inside a transformation, the j in [0, tran.t - 1)
                 for tran_id, tran in enumerate(self.perturbation):
-                    if deltas[tran_id] > 0 and tran.t > 0:
-                        pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
+                    if deltas[tran_id] < self.deltas[tran_id] and tran.t > 0:
+                        pre_deltas = deltas
                         # the input position for pre_deltas
                         in_pos = _in_pos - (tran.s - tran.t)
-                        for j in range(tran.t):
+                        for j in range(tran.t - 1):
                             # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
                             if 0 <= in_pos - j < T:
                                 feasible_mask = (in_pos - j < length) & feasible[
@@ -995,8 +996,27 @@ class LSTMDPGeneral(nn.Module):
                                                                                       in_pos - j, j, :], None),
                                                                         (bottom_h_size_like, bottom_h_size_like))
                                     cur_state = merge(cur_state, masked_cur_state)
-                                    if j == tran.t - 1:
-                                        feasible[(i, slice(None),) + deltas] |= feasible_mask
+
+                # Case 2-2: if it is at the end of a transformation, the j == tran.t - 1
+                for tran_id, tran in enumerate(self.perturbation):
+                    if deltas[tran_id] > 0 and tran.t > 0:
+                        pre_deltas = deltas[:tran_id] + (deltas[tran_id] - 1,) + deltas[tran_id + 1:]
+                        # the input position for pre_deltas
+                        in_pos = _in_pos - (tran.s - tran.t)
+                        j = tran.t - 1
+                        # if in_pos - j does not exceed T and there is any sentence matching at in_pos - j
+                        if 0 <= in_pos - j < T:
+                            feasible_mask = (in_pos - j < length) & feasible[
+                                (i - 1 - j, slice(None),) + pre_deltas] & trans_phi[tran_id][:, in_pos - j]
+                            if feasible_mask.any().item():
+                                DEBUG = False
+                                masked_cur_state = mask_by_feasible(feasible_mask,
+                                                                    compute_state(h[pre_deltas], c[pre_deltas],
+                                                                                  trans_o[tran_id][:,
+                                                                                  in_pos - j, j, :], None),
+                                                                    (bottom_h_size_like, bottom_h_size_like))
+                                cur_state = merge(cur_state, masked_cur_state)
+                                feasible[(i, slice(None),) + deltas] |= feasible_mask
 
                 cur_states.append(cur_state)
 
@@ -1012,7 +1032,8 @@ class LSTMDPGeneral(nn.Module):
                 ret[j].append(ans[i][j])
 
         assert min(length_lb) > 0 and min(length_ub) > 0 and max(length_ub) == len(ret[0])
-        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long().to(self.device), torch.Tensor(length_ub).long().to(self.device))]
+        return ret + [IntervalBoundedTensor(length, torch.Tensor(length_lb).long().to(self.device),
+                                            torch.Tensor(length_ub).long().to(self.device))]
 
     def forward(self, x, trans_output, s0, length, mask=None):
         """Forward pass of LSTM
