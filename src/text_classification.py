@@ -821,7 +821,7 @@ class HotFlipAdversary(Adversary):
     def __init__(self, victim_model, perturbation, tree_attack=False):
         super(HotFlipAdversary, self).__init__(None)
         self.victim_model = victim_model
-        from DSL.transformation import Ins, Del, Sub
+        from DSL.transformation import Ins, Del, Sub, Trans1, Trans2, Trans3, Trans4
         if tree_attack:
             self.attack = HotFlipAttackTree(eval(perturbation))
         else:
