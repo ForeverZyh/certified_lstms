@@ -40,7 +40,8 @@ class AdversarialModel(nn.Module):
     def __init__(self):
         super(AdversarialModel, self).__init__()
 
-    def query(self, x, vocab, device, return_bounds=False, attack_surface=None, perturbation=None):
+    def query(self, x, vocab, device, return_bounds=False, attack_surface=None, perturbation=None,
+              truncate_to=None):
         """Query the model on a Dataset.
 
         Args:
@@ -52,11 +53,12 @@ class AdversarialModel(nn.Module):
         """
         if isinstance(x, str):
             dataset = TextClassificationDataset.from_raw_data(
-                [(x, 0)], vocab, attack_surface=attack_surface, perturbation=perturbation)
+                [(x, 0)], vocab, attack_surface=attack_surface, perturbation=perturbation, truncate_to=truncate_to)
             data = dataset.get_loader(1)
         else:
             dataset = TextClassificationDataset.from_raw_data(
-                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface, perturbation=perturbation)
+                [(x_, 0) for x_ in x], vocab, attack_surface=attack_surface, perturbation=perturbation,
+                truncate_to=truncate_to)
             data = dataset.get_loader(len(x))
 
         with torch.no_grad():
@@ -446,6 +448,38 @@ class LSTMDPModel(AdversarialModel):
         if analysis_mode:
             return output, h_mat, c_mat, lstm_analysis
         return output
+
+
+class LSTMDPModelASCC(LSTMDPModel):
+    def __init__(self, word_vec_size, hidden_size, word_mat, device, filepath, pool='max', dropout=0.2,
+                 perturbation=None, baseline=False):
+        super(LSTMDPModelASCC, self).__init__(word_vec_size, hidden_size, word_mat, device, pool,
+                                              dropout, False, True, perturbation, baseline)
+        filename = os.path.join(filepath, "bilstm_adv_best.pth")
+        checkpoint = torch.load(filename, map_location=torch.device('cpu'))
+        state_dict = checkpoint['net']
+
+        def switch_last_two_hidden(x):
+            # from W_ii|W_if|W_ig|W_io to W_ii|W_if|W_io|W_ig
+            return torch.cat([x[:2*hidden_size], x[3*hidden_size:], x[2*hidden_size:3*hidden_size]], dim=0)
+
+        self.lstm.i2h.weight.data = switch_last_two_hidden(state_dict["bilstm.weight_ih_l0"])
+        self.lstm.i2h.bias.data = switch_last_two_hidden(state_dict["bilstm.bias_ih_l0"])
+        self.lstm.h2h.weight.data = switch_last_two_hidden(state_dict["bilstm.weight_hh_l0"])
+        self.lstm.h2h.bias.data = switch_last_two_hidden(state_dict["bilstm.bias_hh_l0"])
+        self.lstm.back_i2h.weight.data = switch_last_two_hidden(state_dict["bilstm.weight_ih_l0_reverse"])
+        self.lstm.back_i2h.bias.data = switch_last_two_hidden(state_dict["bilstm.bias_ih_l0_reverse"])
+        self.lstm.back_h2h.weight.data = switch_last_two_hidden(state_dict["bilstm.weight_hh_l0_reverse"])
+        self.lstm.back_h2h.bias.data = switch_last_two_hidden(state_dict["bilstm.bias_hh_l0_reverse"])
+        self.linear_input.weight.data = state_dict["linear_transform_embd_1.weight"]
+        self.linear_input.bias.data = state_dict["linear_transform_embd_1.bias"]
+        self.fc_hidden.weight.data = state_dict["hidden1.weight"]
+        self.fc_hidden.bias.data = state_dict["hidden1.bias"]
+        fc_output_w = state_dict["hidden2label.weight"]
+        fc_output_b = state_dict["hidden2label.bias"]
+        self.fc_output.weight.data = (fc_output_w[1] - fc_output_w[0]).unsqueeze(
+            0)  # from (2, hidden_dim) to (1, hidden_dim)
+        self.fc_output.bias.data = (fc_output_b[1] - fc_output_b[0]).unsqueeze(0)
 
 
 class LSTMDPGeneralModel(AdversarialModel):
@@ -978,7 +1012,7 @@ class ExhaustiveAdversary(Adversary):
             # First query the example itself
             orig_pred, (orig_lb, orig_ub) = model.query(
                 x, dataset.vocab, device, return_bounds=True,
-                attack_surface=self.attack_surface, perturbation=self.perturbation)
+                attack_surface=self.attack_surface, perturbation=self.perturbation, truncate_to=opts.truncate_to)
             orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
             assert orig_lb - 1e-5 <= orig_pred <= orig_ub + 1e-5
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
@@ -1002,7 +1036,7 @@ class ExhaustiveAdversary(Adversary):
             is_correct_single = True
             for batch_x in ExhaustiveAdversary.DelDupSubWord(*self.deltas, words, choices, batch_size=10):
                 all_raw = [' '.join(x_new) for x_new in batch_x]
-                preds = model.query(all_raw, dataset.vocab, device)
+                preds = model.query(all_raw, dataset.vocab, device, truncate_to=opts.truncate_to)
                 if not (orig_lb - 1e-5 <= preds.min() and orig_ub + 1e-5 >= preds.max()):
                     print("Fail! ", preds.min(), preds.max())
                     print("Min: ", all_raw[int(preds.min(dim=0)[1][0])])
@@ -1188,6 +1222,7 @@ class GeneralExhaustiveAdversary(Adversary):
     Only practical for short sentences.
     """
     vocab = None
+
     def __init__(self, attack_surface, perturbation):
         super(GeneralExhaustiveAdversary, self).__init__(attack_surface)
         self.perturbation = perturbation
@@ -1521,9 +1556,24 @@ def load_datasets(device, opts):
             raw_data = data_class.get_raw_data(opts.sst2_dir, test=opts.test)
         else:
             raise NotImplementedError
-        word_set = raw_data.get_word_set(attack_surface,
-                                         use_counter_vocab=not opts.use_a3t_settings and not opts.use_none_settings)
-        vocab, word_mat = vocabulary.Vocabulary.read_word_vecs(word_set, opts.glove_dir, opts.glove, device)
+        if opts.model == "lstm-dp-ascc":
+            # load word_mat
+            filename = os.path.join(opts.out_dir, "bilstm_adv_best.pth")
+            checkpoint = torch.load(filename, map_location=torch.device('cpu'))
+            state_dict = checkpoint['net']
+            word_mat = state_dict["embedding.weight"]
+            # load vocab
+            vocab = vocabulary.Vocabulary()
+            index_word = dict(np.load(os.path.join(opts.out_dir, "index_word.npy"), allow_pickle=True).item())
+            vocab.word_list += [None] * len(index_word)
+            for i in range(1, len(index_word) + 1):
+                vocab.word_list[i] = index_word[i]
+            word_index = dict(np.load(os.path.join(opts.out_dir, "word_index.npy"), allow_pickle=True).item())
+            vocab.word2index.update(word_index)
+        else:
+            word_set = raw_data.get_word_set(attack_surface,
+                                             use_counter_vocab=not opts.use_a3t_settings and not opts.use_none_settings)
+            vocab, word_mat = vocabulary.Vocabulary.read_word_vecs(word_set, opts.glove_dir, opts.glove, device)
         if opts.model == "lstm-dp-general":
             train_data = TextClassificationDatasetGeneral.from_raw_data(raw_data.train_data, vocab, attack_surface,
                                                                         downsample_to=opts.downsample_to,
@@ -1640,6 +1690,10 @@ def load_model(word_mat, device, opts):
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
             perturbation=opts.perturbation, bidirectional=not opts.no_bidirectional, baseline=opts.baseline).to(device)
+    elif opts.model == "lstm-dp-ascc":
+        model = LSTMDPModelASCC(
+            100001, opts.hidden_size, word_mat, device, opts.out_dir, pool=opts.pool, dropout=opts.dropout_prob,
+            perturbation=opts.perturbation, baseline=opts.baseline).to(device)
     elif opts.model == "lstm-dp-general":
         model = LSTMDPGeneralModel(
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
@@ -1719,8 +1773,17 @@ class TextClassificationDataset(data_util.ProcessedDataset):
                 raise AttributeError
             else:
                 words = [w for w in all_words if w in vocab]  # Delete UNK words
+
+            # truncate and add padding
             if truncate_to:
                 words = words[:truncate_to]
+                if perturbation is not None:
+                    choices = choices[:truncate_to]
+                for _ in range(truncate_to - len(words)):
+                    words.append(vocabulary.UNK_TOKEN)
+                    if perturbation is not None:
+                        choices.append([vocabulary.UNK_TOKEN])
+
             if len(words) == 0:
                 continue
             word_idxs = [vocab.get_index(w) for w in words] + [0] * ins_delta  # append dummy words
