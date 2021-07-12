@@ -26,6 +26,11 @@ python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2 --load-c
 # HotFlip [(Del,2), (Ins,2)]
 python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2 --load-ckpt 4 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Del(),2), (Ins(),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
 
+# Exhaustive S_{Review}
+python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2 --load-ckpt 4 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only -D --perturbation "[(Trans1, 1), (Trans2, 1), (Trans3, 1), (Trans4, 1), (Sub, 2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# HotFlip S_{Review}
+python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2 --load-ckpt 4 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
 ```
 
 
@@ -59,6 +64,15 @@ python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2
 
 # HotFlip [(Del,2), (Ins,2)]
 python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2_k0.9 --load-ckpt 17 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Del(),2), (Ins(),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test -a hotflip --adv-only
+
+# Train S_{Review}
+python src/train.py classification lstm-dp-general outdir_vivid --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Trans1, 1), (Trans2, 1), (Trans3, 1), (Trans4, 1), (Sub, 2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d"
+
+# Exhaustive S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid --load-ckpt 19 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Trans1, 1), (Trans2, 1), (Trans3, 1), (Trans4, 1), (Sub, 2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test -a exhaustive --adv-only
+
+# HotFlip S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid --load-ckpt 19 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test -a hotflip --adv-only
 ```
 
 
@@ -92,6 +106,15 @@ python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2
 
 # HotFlip [(Del,2), (Ins,2)]
 python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2_fewer_hotflip --load-ckpt 5 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Del(),2), (Ins(),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
+
+# Train S_{Review}
+python src/train.py classification lstm-dp outdir_vivid_hotflip --pool final --no-bidirectional -d 100 -T 24 -c 0 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,1)]"  --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --early-stopping 5
+
+# Exhaustive S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid_hotflip --load-ckpt 8 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only -D --perturbation "[(Trans1, 1), (Trans2, 1), (Trans3, 1), (Trans4, 1), (Sub, 2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# HotFlip S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid_hotflip --load-ckpt 8 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
 ```
 
 
@@ -125,6 +148,15 @@ python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2
 
 # HotFlip [(Del,2), (Ins,2)]
 python src/train.py classification lstm-dp out -L outdir_lstm_cert_sst2_del2ins2_fewer_dataaug --load-ckpt 11 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Del(),2), (Ins(),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
+
+# Train S_{Review}
+python src/train.py classification lstm-dp outdir_vivid_dataaug --pool final --no-bidirectional -d 100 -T 24 -c 0 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,1)]"  --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --early-stopping 5 --use-random-aug
+
+# Exhaustive S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid_dataaug --load-ckpt 7 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Trans1, 1), (Trans2, 1), (Trans3, 1), (Trans4, 1), (Sub, 2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# HotFlip S_{Review}
+python src/train.py classification lstm-dp-general out -L outdir_vivid_dataaug --load-ckpt 7 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]" --adv-perturbation="[(Trans1(), 1), (Trans2(), 1), (Trans3(), 1), (Trans4(), 1), (Sub('data/pddb', True),2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --test --use-fewer-sub -a hotflip --adv-only
 ```
 
 
@@ -385,6 +417,40 @@ python src/train.py classification lstm-dp out -L outdir_bilstm_cert_sst2_del2in
 
 
 
+## ARC Compare to A3T
+
+The training scripts and trained models are the same as (Sec. LSTM on SST2)
+
+#### ARC + A3T
+
+```bash
+# Train [(Sub, 2), (Del, 2)], abstract Sub
+python src/train.py classification lstm-dp sst2_sub2del2_A3T_abs_sub --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,2)]" --aug-perturbation "[(Del,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
+
+# Test [(Sub, x), (Del, y)] (x=2, y=1..3) or (x=1..3, y=2)
+python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_sub --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# Train [(Sub, 2), (Del, 2)], abstract Del
+python src/train.py classification lstm-dp sst2_sub2del2_A3T_abs_del --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Del,2)]" --aug-perturbation "[(Sub,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
+
+# Test [(Sub, x), (Del, y)] (x=2, y=1..3) or (x=1..3, y=2)
+python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_del --load-ckpt 23 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# Train [(Sub, 2), (Ins, 2)], abstract Sub
+python src/train.py classification lstm-dp sst2_sub2ins2_A3T_abs_sub --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,2)]" --aug-perturbation "[(Ins,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
+
+# Test [(Sub, x), (Ins, y)] (x=2, y=1..3) or (x=1..3, y=2)
+python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_sub --load-ckpt 18 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# Train [(Sub, 2), (Ins, 2)], abstract Ins
+python src/train.py classification lstm-dp sst2_sub2ins2_A3T_abs_ins --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Ins,2)]" --aug-perturbation "[(Sub,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
+
+# Test [(Sub, x), (Ins, y)] (x=2, y=1..3) or (x=1..3, y=2)
+python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_ins --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+```
+
+
+
 ## ARC Compare to CertSub
 
 ```bash
@@ -403,9 +469,36 @@ python src/train.py classification lstm-dp out -L outdir_lstm_cert_dp_2 --load-c
 
 
 
-## ARC Compare to A3T
+## ARC Compare to ASCC
 
-The training scripts and trained models are the same as (Sec. LSTM on SST2)
+For training the ASCC model, please see https://github.com/ForeverZyh/ASCC.
+
+```bash
+# Exhaustive [(Sub, 1)]
+python src/train.py classification lstm-dp-ascc out -L ascc -d 100 --pool mean -T 0 --test -b 1 --perturbation="[(Sub,1)]" --use-lm --dataset "Imdb" --downsample-to 1000 --downsample-shard 0 -a exhaustive --adv-only
+
+# Exhaustive [(Sub, 2)]
+python src/train.py classification lstm-dp-ascc out -L ascc -d 100 --pool mean -T 0 --test -b 1 --perturbation="[(Sub,2)]" --use-lm --dataset "Imdb" --downsample-to 1000 --downsample-shard 0 -a exhaustive --adv-only
+```
+
+
+
+## ARC Compare to POPQORN & Huang et al.
+
+Training the `[(Sub, 3)]` model:
+
+```bash
+# Train [(Sub,3)]
+python src/train.py classification lstm-dp sst2_sub3 --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.6 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,2), (Del,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub
+
+# Exhaustive [(Sub,3)]
+python src/train.py classification lstm-dp out -L sst2_sub3 --load-ckpt 23 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,3]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+
+# HotFlip [(Sub,3)]
+python src/train.py classification lstm-dp out -L sst2_sub3 --load-ckpt 23 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,1)]"  --adv-perturbation "[(Sub('data/pddb', True),3]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a hotflip --adv-only
+```
+
+For POPQORN testing, please see https://github.com/ForeverZyh/POPQORN.
 
 
 
