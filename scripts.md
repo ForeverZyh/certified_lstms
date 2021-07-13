@@ -427,26 +427,26 @@ The training scripts and trained models are the same as (Sec. LSTM on SST2)
 # Train [(Sub, 2), (Del, 2)], abstract Sub
 python src/train.py classification lstm-dp sst2_sub2del2_A3T_abs_sub --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,2)]" --aug-perturbation "[(Del,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
 
-# Test [(Sub, x), (Del, y)] (x=2, y=1..3) or (x=1..3, y=2)
-python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_sub --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+# Test [(Sub, x), (Del, x)] (x=1..3)
+python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_sub --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,x)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
 
 # Train [(Sub, 2), (Del, 2)], abstract Del
 python src/train.py classification lstm-dp sst2_sub2del2_A3T_abs_del --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Del,2)]" --aug-perturbation "[(Sub,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
 
-# Test [(Sub, x), (Del, y)] (x=2, y=1..3) or (x=1..3, y=2)
-python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_del --load-ckpt 23 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+# Test [(Sub, x), (Del, x)] (x=1..3)
+python src/train.py classification lstm-dp out -L sst2_sub2del2_A3T_abs_del --load-ckpt 23 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Del,x)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
 
 # Train [(Sub, 2), (Ins, 2)], abstract Sub
 python src/train.py classification lstm-dp sst2_sub2ins2_A3T_abs_sub --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Sub,2)]" --aug-perturbation "[(Ins,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
 
-# Test [(Sub, x), (Ins, y)] (x=2, y=1..3) or (x=1..3, y=2)
-python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_sub --load-ckpt 18 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+# Test [(Sub, x), (Ins, x)] (x=1..3)
+python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_sub --load-ckpt 18 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,x)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
 
 # Train [(Sub, 2), (Ins, 2)], abstract Ins
 python src/train.py classification lstm-dp sst2_sub2ins2_A3T_abs_ins --pool final --no-bidirectional -d 100 -T 24 --full-train-epochs 8 -c 0.8 --dropout-prob 0.2 -b 32 --save-best-only --perturbation "[(Ins,2)]" --aug-perturbation "[(Sub,2)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --eaugment-by 2
 
-# Test [(Sub, x), (Ins, y)] (x=2, y=1..3) or (x=1..3, y=2)
-python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_ins --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,y)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
+# Test [(Sub, x), (Ins, x)] (x=1..3)
+python src/train.py classification lstm-dp out -L sst2_sub2ins2_A3T_abs_ins --load-ckpt 22 --pool final --no-bidirectional -d 100 -T 0 -b 1 --save-best-only --perturbation "[(Sub,x), (Ins,x)]" --dataset "SST2" --use-a3t-settings -g "6B.300d" --use-fewer-sub --test -a exhaustive --adv-only
 ```
 
 
