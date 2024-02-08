@@ -669,31 +669,52 @@ class LSTMDP(nn.Module):
                 # Ins
                 if self.deltas[1] > 0:  # Ins, [:,here,:,:,:] (Del, Ins, Sub, B, d)
                     # origin input
-                    ins_extend = compute_state(h[:, 0, :, :, :].reshape(-1, d), c[:, 0, :, :, :].reshape(-1, d)
-                                               , x[:, i, :], mask[:, i].unsqueeze(-1) if mask is not None else None,
-                                               None)
-                    ins_extend = view(ins_extend, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
-                    for j in range(1, self.deltas_p1[1]):
-                        if idxs_idx < j * 2 - 1:
-                            # e.g., when i = 2 and j = 2, it is not possible to have 2 Ins before (including) i = 2
-                            ins_extend = tuple([cat([s, s[:, :1, :, :, :]], dim=1) for s in ins_extend])
-                            continue
-                        if idxs_idx < j * 2:  # if j Ins's have already been done, then we start with i - j
-                            ins_t_extend = None
-                        else:
-                            ins_t_extend = compute_state(h[:, j, :, :, :].reshape(-1, d),
-                                                         c[:, j, :, :, :].reshape(-1, d), x[:, idxs[idxs_idx - j], :],
+                    ins_extend = None
+                    ins_extend_special = None
+                    for j in range(self.deltas_p1[1]):
+                        # Case 1.1: f[i-1][j] --> f[i][j], first time
+                        if idxs_idx >= j * 2:
+                            ins_extend_t = compute_state(h[:, j, :, :, :].reshape(-1, d),
+                                                         c[:, j, :, :, :].reshape(-1, d),
+                                                         x[:, idxs[idxs_idx - j], :],
                                                          mask[:, idxs[idxs_idx - j]].unsqueeze(
-                                                             -1) if mask is not None else None, None)
+                                                             -1) if mask is not None else None,
+                                                         None)
+                        else:
+                            ins_extend_t = ins_extend[0][:, :1, :, :, :].reshape(-1, d), \
+                                           ins_extend[1][:, :1, :, :, :].reshape(-1, d)
+                        # Case 1.2: f_special[i-1][j-1] --> f[i][j], second time
+                        if j > 0 and ins_extend_special_pre is not None and idxs_idx >= j * 2 - 1:
+                            ins_extend_t_1 = compute_state(ins_extend_special_pre[0][:, j - 1, :, :, :].reshape(-1, d),
+                                                           ins_extend_special_pre[1][:, j - 1, :, :, :].reshape(-1, d),
+                                                           x[:, idxs[idxs_idx - j], :],
+                                                           mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                               -1) if mask is not None else None,
+                                                           None)
+                            ins_extend_t = merge(ins_extend_t, ins_extend_t_1)
+                        # Case 1.3: f[i-1][j] -> f_special[i][j], first time
+                        if idxs_idx >= j * 2 and j < self.deltas_p1[1]:
+                            ins_extend_t_special = compute_state(h[:, j, :, :, :].reshape(-1, d),
+                                                                 c[:, j, :, :, :].reshape(-1, d),
+                                                                 x[:, idxs[idxs_idx - j], :],
+                                                                 mask[:, idxs[idxs_idx - j]].unsqueeze(
+                                                                     -1) if mask is not None else None,
+                                                                 None)
+                        else:
+                            ins_extend_t_special = ins_extend_special[0][:, :1, :, :, :].reshape(-1, d), \
+                                                   ins_extend_special[1][:, :1, :, :, :].reshape(-1, d)
+                        ins_extend_t = view(ins_extend_t, self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
+                        ins_extend_t_special = view(ins_extend_t_special, self.deltas[0] + 1, 1, self.deltas[2] + 1, B,
+                                                    d)
+                        if ins_extend is None:
+                            ins_extend = ins_extend_t
+                            ins_extend_special = ins_extend_t_special
+                        else:
+                            ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_extend_t)])
+                            ins_extend_special = tuple(
+                                [cat([s, t], dim=1) for s, t in zip(ins_extend_special, ins_extend_t_special)])
 
-                        # if j - 1 Ins's have already been done, we dup it
-                        ins_t_1 = compute_state(h[:, j - 1, :, :, :].reshape(-1, d),
-                                                c[:, j - 1, :, :, :].reshape(-1, d), x[:, idxs[idxs_idx - j], :],
-                                                mask[:, idxs[idxs_idx - j]].unsqueeze(-1) if mask is not None else None,
-                                                None)
-                        ins_t_extend = view(merge(ins_t_extend, ins_t_1) if ins_t_extend is not None else ins_t_1,
-                                            self.deltas[0] + 1, 1, self.deltas[2] + 1, B, d)
-                        ins_extend = tuple([cat([s, t], dim=1) for s, t in zip(ins_extend, ins_t_extend)])
+                    ins_extend_special_pre = ins_extend_special
 
                 if self.deltas[2] > 0:  # Sub, [:,:,here,:,:] (Del, Ins, Sub, B, d)
                     def sub_ins_j(h, c, x, output, mask):
