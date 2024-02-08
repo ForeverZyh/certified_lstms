@@ -312,6 +312,97 @@ class LSTMModel(AdversarialModel):
         return output
 
 
+class TransformerModel(AdversarialModel):
+    """LSTM text classification model.
+
+    Here is the overall architecture:
+      1) Rotate word vectors
+      2) Feed to bi-LSTM
+      3) Max/mean pool across all time
+      4) Predict with MLP
+
+    """
+
+    def __init__(self, word_vec_size, d_hidden, d_head, word_mat, device, perturbation, dropout=0.2):
+        super(TransformerModel, self).__init__()
+        self.adv_attack = False  # use to compute the gradients
+        self.out_x_vecs = None  # use to compute the gradients
+        self.device = device
+        self.embs = ibp.Embedding.from_pretrained(word_mat)
+        self.linear_input = ibp.Linear(word_vec_size, d_hidden)
+        self.transformer = ibp.Transformer(d_hidden, d_head, perturbation)
+        self.dropout = ibp.Dropout(dropout)
+        self.fc_hidden = ibp.Linear(d_hidden, d_hidden)
+        self.fc_output = ibp.Linear(d_hidden, 1)
+
+    def forward(self, batch, compute_bounds=True, cert_eps=1.0):
+        """
+        Args:
+          batch: A batch dict from a TextClassificationDataset with the following keys:
+            - x: tensor of word vector indices, size (B, n, 1)
+            - mask: binary mask over words (1 for real, 0 for pad), size (B, n)
+            - lengths: lengths of sequences, size (B,)
+          compute_bounds: If True compute the interval bounds and reutrn an IntervalBoundedTensor as logits. Otherwise just use the values
+          cert_eps: Scaling factor for interval bounds of the input
+        """
+        if compute_bounds:
+            x = batch['x']
+        else:
+            x = batch['x'].val
+        mask = batch['mask']
+        lengths = batch['lengths']
+
+        B = x.shape[0]
+        x_vecs = self.embs(x)  # B, n, d
+        if self.adv_attack:
+            x_vecs.requires_grad = True
+            self.out_x_vecs = x_vecs
+        z_interval = None
+        unk_mask = None
+        x_vecs = self.linear_input(x_vecs)  # B, n, h
+        if isinstance(x_vecs, ibp.DiscreteChoiceTensorWithUNK):
+            x_interval = x_vecs.to_interval_bounded(eps=cert_eps)
+            unk_mask = x_vecs.unk_mask.to(self.device)
+            x_vecs = x_vecs.val
+            z_interval = ibp.activation(F.relu, x_interval)  # B, n, h
+
+        z = ibp.activation(F.relu, x_vecs)  # B, n, h
+        output = self.transformer(z, z_interval, mask=mask, unk_mask=unk_mask, lengths=lengths)
+        fc_hidden = ibp.activation(F.relu, self.fc_hidden(output))  # B, h
+        fc_hidden = self.dropout(fc_hidden)
+        output = self.fc_output(fc_hidden)  # B, 1
+        return output
+
+    def get_embed(self, x, ret_len=None):
+        """
+        :param x: tensor of word vector indices
+        :param ret_len: the return length, if None, the length is equal to len(x). if len(x) < ret_len, we add padding
+        :return: np array with shape (ret_len, word_vec_size)
+        """
+        if ret_len is None:
+            ret_len = len(x)
+        ret = np.zeros((ret_len, self.word_vec_size))
+        with torch.no_grad():
+            ret[:len(x)] = self.embs(x.unsqueeze(0))[0].cpu().numpy()
+        return ret
+
+    def get_grad(self, x, y):
+        """
+        :param x: tensor of word vector indices (B, len)
+        :param y: tensor of labels (B, 1)
+        :return: np array with shape (B, len, word_vec_size)
+        """
+        self.adv_attack = True
+
+        logits = self.forward(x, compute_bounds=False)
+        loss = LOSS_FUNC(logits, y)
+        loss.backward()
+
+        self.adv_attack = False
+
+        return self.out_x_vecs.grad.cpu().numpy()
+
+
 class LSTMDPModel(AdversarialModel):
     """LSTM text classification model.
     A specific implementation for Sub, Ins, Del
@@ -461,7 +552,7 @@ class LSTMDPModelASCC(LSTMDPModel):
 
         def switch_last_two_hidden(x):
             # from W_ii|W_if|W_ig|W_io to W_ii|W_if|W_io|W_ig
-            return torch.cat([x[:2*hidden_size], x[3*hidden_size:], x[2*hidden_size:3*hidden_size]], dim=0)
+            return torch.cat([x[:2 * hidden_size], x[3 * hidden_size:], x[2 * hidden_size:3 * hidden_size]], dim=0)
 
         self.lstm.i2h.weight.data = switch_last_two_hidden(state_dict["bilstm.weight_ih_l0"])
         self.lstm.i2h.bias.data = switch_last_two_hidden(state_dict["bilstm.bias_ih_l0"])
@@ -1000,10 +1091,11 @@ class ExhaustiveAdversary(Adversary):
     Only practical for short sentences.
     """
 
-    def __init__(self, attack_surface, perturbation):
+    def __init__(self, attack_surface, perturbation, cert=False):
         super(ExhaustiveAdversary, self).__init__(attack_surface)
         self.perturbation = perturbation
         self.deltas = Perturbation.str2deltas(perturbation)
+        self.cert = cert
 
     def run(self, model, dataset, device, opts=None):
         is_correct = []
@@ -1690,6 +1782,10 @@ def load_model(word_mat, device, opts):
             vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size,
             word_mat, device, pool=opts.pool, dropout=opts.dropout_prob, no_wordvec_layer=opts.no_wordvec_layer,
             perturbation=opts.perturbation, bidirectional=not opts.no_bidirectional, baseline=opts.baseline).to(device)
+    elif opts.model == "transformer":
+        model = TransformerModel(
+            vocabulary.GLOVE_CONFIGS[opts.glove]['size'], opts.hidden_size, opts.head_num,
+            word_mat, device, perturbation=opts.perturbation, dropout=opts.dropout_prob).to(device)
     elif opts.model == "lstm-dp-ascc":
         model = LSTMDPModelASCC(
             100001, opts.hidden_size, word_mat, device, opts.out_dir, pool=opts.pool, dropout=opts.dropout_prob,

@@ -8,11 +8,12 @@ from itertools import product
 from torch import nn
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
+import math
 
 from perturbation import Perturbation
 
-# DEBUG = False
-DEBUG = True
+DEBUG = False
+# DEBUG = True
 TOLERANCE = 1e-5
 
 
@@ -58,6 +59,9 @@ class IntervalBoundedTensor(BoundedTensor):
             if max_ub_violation > TOLERANCE:
                 print('WARNING: Upper bound wrong (max error = %g)' % max_ub_violation.item(), file=sys.stderr)
 
+    def __repr__(self):
+        return 'IntervalBoundedTensor(%s, %s, %s)' % (self.val, self.lb, self.ub)
+
     @staticmethod
     def bottom_like(x):
         return IntervalBoundedTensor(torch.zeros_like(x), torch.ones_like(x) * 1e16, torch.ones_like(x) * (-1e16))
@@ -66,6 +70,21 @@ class IntervalBoundedTensor(BoundedTensor):
     def bottom(x, device):
         return IntervalBoundedTensor(torch.zeros(x, device=device), torch.ones(x, device=device) * 1e16,
                                      torch.ones(x, device=device) * (-1e16))
+
+    def is_bottom(self):
+        return self.lb > self.ub + TOLERANCE
+
+    @staticmethod
+    def zeros_like(x):
+        return IntervalBoundedTensor(torch.zeros_like(x), torch.zeros_like(x), torch.zeros_like(x))
+
+    @staticmethod
+    def zeros(x, device):
+        return IntervalBoundedTensor(torch.zeros(x, device=device), torch.zeros_like(x, device=device),
+                                     torch.zeros_like(x, device=device))
+
+    def detach(self):
+        return IntervalBoundedTensor(self.val.detach(), self.lb.detach(), self.ub.detach())
 
     @staticmethod
     def point(x):
@@ -77,6 +96,9 @@ class IntervalBoundedTensor(BoundedTensor):
     ### Reimplementations of torch.Tensor methods
     def __neg__(self):
         return IntervalBoundedTensor(-self.val, -self.ub, -self.lb)
+
+    def transpose(self, *dims):
+        return IntervalBoundedTensor(self.val.transpose(*dims), self.lb.transpose(*dims), self.ub.transpose(*dims))
 
     def permute(self, *dims):
         return IntervalBoundedTensor(self.val.permute(*dims),
@@ -97,6 +119,11 @@ class IntervalBoundedTensor(BoundedTensor):
         return IntervalBoundedTensor(self.val.flip(dim),
                                      self.lb.flip(dim),
                                      self.ub.flip(dim))
+
+    def contiguous(self):
+        return IntervalBoundedTensor(self.val.contiguous(),
+                                     self.lb.contiguous(),
+                                     self.ub.contiguous())
 
     def merge(self, x2):
         if isinstance(x2, IntervalBoundedTensor):
@@ -123,6 +150,14 @@ class IntervalBoundedTensor(BoundedTensor):
         self.lb = self.lb.to(device)
         self.ub = self.ub.to(device)
         return self
+
+    def maximize(self, other):
+        if isinstance(other, IntervalBoundedTensor):
+            return IntervalBoundedTensor(torch.max(self.val, other.val), torch.max(self.lb, other.lb),
+                                         torch.max(self.ub, other.ub))
+        else:
+            return IntervalBoundedTensor(torch.max(self.val, other), torch.max(self.lb, other),
+                                         torch.max(self.ub, other))
 
     # For slicing
     def __getitem__(self, key):
@@ -401,6 +436,241 @@ class MaxPool1d(nn.MaxPool1d):
             raise TypeError(x)
 
 
+class MultiheadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, perturbation, dropout=0.2, device='cpu'):
+        super(MultiheadAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.device = device
+        self.deltas = Perturbation.str2deltas(perturbation)
+        self.deltas_p1 = [delta + 1 for delta in self.deltas]
+        self.Ins_delta = self.deltas[1]
+        self.Sub_delta = self.deltas[2]
+
+        self.q_linear = Linear(embed_dim, embed_dim)
+        self.k_linear = Linear(embed_dim, embed_dim)
+        self.v_linear = Linear(embed_dim, embed_dim)
+        self.dropout = Dropout(dropout)
+
+    def project(self, z):
+        q = self.q_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        return q, k, v
+
+    def forward_dp(self, _x, _interval_x, pe, mask=None, lengths=None):
+        # unk_mask will not be used because we do not consider Del for now
+        # pe: (1, seq_len, d_model)
+        batch_size, seq_len, model_dim = _x.size()
+
+        # Linear projections
+        def project(z):
+            q = self.q_linear(z).view(-1, batch_size, seq_len, self.num_heads, self.head_dim).transpose(-3, -2)
+            k = self.k_linear(z).view(-1, batch_size, seq_len, self.num_heads, self.head_dim).transpose(-3, -2)
+            v = self.v_linear(z).view(-1, batch_size, seq_len, self.num_heads, self.head_dim).transpose(-3, -2)
+            return q, k, v
+
+        c = torch.Tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
+        bottom_f = IntervalBoundedTensor.bottom((batch_size, self.num_heads, self.head_dim), self.device)
+        bottom_psum = IntervalBoundedTensor.bottom((batch_size, self.num_heads, 1), self.device)
+
+        def compute(pre: IntervalBoundedTensor, x, exponent, cur):
+            mask = pre.is_bottom().any(dim=-1, keepdim=True). \
+                any(dim=-2, keepdim=True). \
+                any(dim=-3, keepdim=True)
+            y = mul(exponent, c).unsqueeze(-1)
+            pre = transform(pre, cur, x, y)
+            # compute x = log(e^x + e^y), numerical stable
+            x = numerical_stable_log(x, y)
+            pre = where(mask, bottom_f, pre)
+            x = where(mask, bottom_psum, x)
+            return pre, x
+
+        x = []
+        interval_x = []
+        for f_ins in range(self.Ins_delta + 1):  # the final delta for Ins
+            x.append(_x + pe[:, f_ins:seq_len + f_ins])
+            interval_x.append(_interval_x + pe[:, f_ins:seq_len + f_ins])
+        x = stack(x, dim=0)  # (self.Ins_delta + 1, batch_size, seq_len, d_model)
+        interval_x = stack(interval_x, dim=0)
+        q, k, v = project(x)  # (self.Ins_delta + 1, batch_size, num_heads, seq_len, head_dim)
+        q_interval, k_interval, v_interval = project(interval_x)
+
+        # exponent_max = (matmul(q.detach(),  # for numerical stability
+        #                        k.detach().transpose(-2, -1)) * c).max(dim=0)[0] \
+        #     [torch.arange(batch_size), :, lengths - 1, :].max(dim=-1)[0]
+
+        def init_f_psum(f_ins):
+            f = IntervalBoundedTensor.bottom(
+                (f_ins + 1, self.Sub_delta + 1, batch_size, self.num_heads, self.head_dim), self.device)
+            psum = IntervalBoundedTensor.bottom(
+                (f_ins + 1, self.Sub_delta + 1, batch_size, self.num_heads, 1), self.device)
+            return f, psum
+
+        output = IntervalBoundedTensor.bottom((batch_size, model_dim), self.device)
+        for f_ins in range(self.Ins_delta + 1):  # the final delta for Ins
+            for is_end_interval in range(2):
+                if is_end_interval:
+                    q_end = q_interval[f_ins, torch.arange(batch_size), :, lengths - 1, :]
+                else:
+                    q_end = q[f_ins, torch.arange(batch_size), :, lengths - 1, :]  # (batch_size, num_heads, head_dim)
+                # f: v*exp(qk), psum: prefix sum of exp(qk), shape: (d_ins, d_sub, batch_size, num_heads, head_dim/1)
+                f, psum = init_f_psum(f_ins)
+                f.lb[0, 0] = f.ub[0, 0] = torch.zeros_like(f[0, 0].val)
+                psum.val[0, 0] = psum.lb[0, 0] = psum.ub[0, 0] = torch.ones_like(psum[0, 0].val) * (-1e16)
+                f_ins_special_pre, psum_ins_special_pre = init_f_psum(f_ins)
+                for i in range(seq_len + f_ins):
+                    cur_ins = None
+                    cur_ins_special = None
+                    cur_sub = None
+                    # Case 1: Ins
+                    for j in range(f_ins + 1):
+                        # Case 1.1: f[i-1][j] --> f[i][j], first time
+                        if i >= j * 2 and i - j < seq_len:
+                            cur_ins_t = compute(f[j], psum[j],
+                                                sum(mul(q_end, k[j, :, :, i - j, :]), -1),
+                                                v[j, :, :, i - j, :])
+                        else:
+                            cur_ins_t = None
+                        # Case 1.2: f_special[i-1][j-1] --> f[i][j], second time
+                        if j > 0 and i >= j * 2 - 1 and i - j < seq_len:
+                            cur_ins_t_1 = compute(f_ins_special_pre[j - 1], psum_ins_special_pre[j - 1],
+                                                  sum(mul(q_end, k[j, :, :, i - j, :]), -1),
+                                                  v[j, :, :, i - j, :])
+                            cur_ins_t = merge(cur_ins_t, cur_ins_t_1) if cur_ins_t is not None else None
+                        # Case 1.3: f[i-1][j] -> f_special[i][j], first time
+                        if j < f_ins and i >= j * 2 and i - j < seq_len:
+                            cur_ins_t_special = compute(f[j], psum[j],
+                                                        sum(mul(q_end, k[j, :, :, i - j, :]), -1),
+                                                        v[j, :, :, i - j, :])
+                        else:
+                            cur_ins_t_special = None
+
+                        if cur_ins_t is not None:
+                            cur_ins_t = cur_ins_t[0].unsqueeze(0), cur_ins_t[1].unsqueeze(0)
+                        else:
+                            cur_ins_t = IntervalBoundedTensor.bottom_like(f[:1].val), \
+                                        IntervalBoundedTensor.bottom_like(psum[:1].val)
+                        if cur_ins_t_special is not None:
+                            cur_ins_t_special = cur_ins_t_special[0].unsqueeze(0), cur_ins_t_special[1].unsqueeze(0)
+                        else:
+                            cur_ins_t_special = IntervalBoundedTensor.bottom_like(f[:1].val), \
+                                                IntervalBoundedTensor.bottom_like(psum[:1].val)
+
+                        if cur_ins is None:
+                            cur_ins = cur_ins_t
+                            cur_ins_special = cur_ins_t_special
+                        else:
+                            cur_ins = tuple([cat([s, t], dim=0) for s, t in zip(cur_ins, cur_ins_t)])
+                            cur_ins_special = tuple(
+                                [cat([s, t], dim=0) for s, t in zip(cur_ins_special, cur_ins_t_special)])
+
+                    f_ins_special_pre, psum_ins_special_pre = cur_ins_special
+
+                    # Case 2: Sub
+                    for j in range(self.Sub_delta + 1):
+                        # Case 2.1: not sub
+                        slc2 = torch.clamp(i - torch.arange(f_ins + 1), max=seq_len - 1, min=0)
+                        slc1 = torch.arange(f_ins + 1)
+                        if i < seq_len + f_ins - 1 or not is_end_interval:
+                            cur_sub_t = compute(f[:, j], psum[:, j],
+                                                sum(mul(q_end,
+                                                        k[slc1, :, :, slc2, :]), -1),
+                                                v[slc1, :, :, slc2, :])
+                        else:
+                            cur_sub_t = None
+
+                        # Case 2.2: sub
+                        if j > 0 and (i < seq_len + f_ins - 1 or is_end_interval):
+                            cur_sub_t_1 = compute(f[:, j - 1], psum[:, j - 1],
+                                                  sum(mul(q_end, k_interval[slc1, :, :, slc2, :]), -1),
+                                                  v_interval[slc1, :, :, slc2, :])
+                            cur_sub_t = merge(cur_sub_t, cur_sub_t_1) if cur_sub_t is not None else None
+
+                        if cur_sub_t is not None:
+                            cur_sub_t = cur_sub_t[0].unsqueeze(1), cur_sub_t[1].unsqueeze(1)
+                        else:
+                            cur_sub_t = IntervalBoundedTensor.bottom_like(f[:, :1].val), \
+                                        IntervalBoundedTensor.bottom_like(psum[:, :1].val)
+
+                        if cur_sub is None:
+                            cur_sub = cur_sub_t
+                        else:
+                            cur_sub = tuple([cat([s, t], dim=1) for s, t in zip(cur_sub, cur_sub_t)])
+
+                    f, psum = merge(cur_ins, cur_sub)
+
+                    for j in range(is_end_interval, self.Sub_delta + 1):
+                        mask = f[f_ins, j].is_bottom().any()
+                        output = where(((lengths - 1 == i + f_ins) & ~mask).unsqueeze(-1),
+                                       output.merge(add(self.dropout(f[f_ins, j].view(batch_size, -1)),
+                                                        x[f_ins, torch.arange(batch_size), lengths - 1])),
+                                       output)
+
+        return output
+
+    def forward(self, x, pe, mask=None, lengths=None):
+        batch_size, seq_len, _ = x.size()
+        x += pe
+        # Linear projections
+        query, key, value = self.project(x)
+
+        # Scaled dot-product attention
+        c = torch.Tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
+        scores = matmul(query, key.transpose(-2, -1)) * c
+
+        attn_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.uint8))
+        attn_mask = attn_mask.unsqueeze(0).unsqueeze(1)  # Add batch and head dimensions
+        scores = scores.masked_fill(attn_mask == 0, float('-inf'))
+
+        attention_weights = F.softmax(scores, dim=-1)
+        # print(attention_weights.shape, value.shape)
+
+        # Weighted sum of values
+        # print(attention_weights)
+        output = matmul(attention_weights, value).transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        # print(output[torch.arange(output.shape[0]), lengths - 1])
+        output = x + self.dropout(output)
+        output = output[torch.arange(output.shape[0]), lengths - 1]
+        return output
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, dropout: float = 0.2, max_len: int = 5000):
+        super().__init__()
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        self.pe = pe
+
+
+class Transformer(nn.Module):
+
+    def __init__(self, d_model: int, nhead: int, perturbation, dropout: float = 0.2, device='cpu'):
+        super().__init__()
+        self.model_type = 'Transformer'
+        self.pos_encoder = PositionalEncoding(d_model, dropout=dropout)
+        self.transformer = MultiheadAttention(d_model, nhead, perturbation, dropout=dropout, device=device)
+        self.d_model = d_model
+        self.device = device
+
+    def forward(self, z, z_interval, mask=None, unk_mask=None, lengths=None):
+        c = torch.Tensor([math.sqrt(self.d_model)], device=self.device)
+        z = z * c
+        if z_interval is None:
+            pe = self.pos_encoder.pe[:, :z.size(1)].to(self.device)
+            output = self.transformer.forward(z, pe, mask, lengths=lengths)
+        else:
+            z_interval = z_interval * c
+            pe = self.pos_encoder.pe[:, :z.size(1) + self.transformer.Ins_delta].to(self.device)
+            output = self.transformer.forward_dp(z, z_interval, pe, mask, lengths=lengths)
+        return output
+
+
 class LSTM(nn.Module):
     """An LSTM."""
 
@@ -629,10 +899,12 @@ class LSTMDP(nn.Module):
             output = output.repeat(np.prod(self.deltas_p1), 1, 1)
             mask = mask.repeat(np.prod(self.deltas_p1), 1) if mask is not None else None
             unk_mask = unk_mask.repeat(np.prod(self.deltas_p1), 1) if unk_mask is not None else None
+            ins_extend_special_pre = None
             for idxs_idx, i in enumerate(idxs):
                 # identity
                 del_extend = None
                 ins_extend = None
+                ins_extend_special = None
                 sub_extend = None
                 # Del
                 if self.deltas[0] > 0:  # Del, [here,:,:,:,:] (Del, Ins, Sub, B, d)
@@ -1501,6 +1773,15 @@ def merge(X1, X2):
     return ret
 
 
+def exp(x):
+    if isinstance(x, torch.Tensor):
+        return torch.exp(x)
+    elif isinstance(x, IntervalBoundedTensor):
+        return IntervalBoundedTensor(torch.exp(x.val), torch.exp(x.lb), torch.exp(x.ub))
+    else:
+        raise TypeError(x)
+
+
 def view(X: tuple, *dims):
     ret = ()
     for x in X:
@@ -1514,3 +1795,150 @@ def where(pred: torch.Tensor, x1: IntervalBoundedTensor, x2: IntervalBoundedTens
         torch.where(pred, x1.lb, x2.lb),
         torch.where(pred, x1.ub, x2.ub)
     )
+
+
+def transform(pre, cur, x, y):
+    # compute pre * x / (x + y) + cur * y / (x + y)
+    theta_x = get_theta(x, y)
+    theta_y = get_theta(y, x)
+    ans1 = add(mul(theta_x, add(- cur, pre)), cur)
+    ans2 = add(mul(theta_y, add(- pre, cur)), pre)
+    return IntervalBoundedTensor(ans1.val, torch.max(ans1.lb, ans2.lb), torch.min(ans1.ub, ans2.ub))
+
+
+def numerical_stable(x, y):
+    # compute e^x / (e^x + e^y)
+    # numerical stable version
+    # e^x / (e^x + e^y) = 1 / (1 + e^(y - x))
+    return 1 / (1 + torch.exp(y - x))
+
+
+def numerical_stable_log(x, y):
+    # compute log(e^x + e^y)
+    # numerical stable version
+    # log(e^x + e^y) = max(x, y) + log(1 + e^(-|x - y|))
+    if not isinstance(x, IntervalBoundedTensor) and not isinstance(y, IntervalBoundedTensor):
+        return torch.max(x, y) + torch.log1p(torch.exp(-torch.abs(x - y)))
+    elif isinstance(x, IntervalBoundedTensor) and isinstance(y, IntervalBoundedTensor):
+        return IntervalBoundedTensor(
+            numerical_stable_log(x.val, y.val),
+            numerical_stable_log(x.lb, y.lb),
+            numerical_stable_log(x.ub, y.ub)
+        )
+    elif isinstance(x, IntervalBoundedTensor):
+        return IntervalBoundedTensor(
+            numerical_stable_log(x.val, y),
+            numerical_stable_log(x.lb, y),
+            numerical_stable_log(x.ub, y)
+        )
+    else:
+        return IntervalBoundedTensor(
+            numerical_stable_log(x, y.val),
+            numerical_stable_log(x, y.lb),
+            numerical_stable_log(x, y.ub)
+        )
+
+
+def get_theta(x, y):
+    # compute e^x / (e^x + e^y)
+    # and tighten by [0, 1]
+    if isinstance(x, IntervalBoundedTensor) and isinstance(y, IntervalBoundedTensor):
+        val = numerical_stable(x.val, y.val)
+        lb = torch.clamp(numerical_stable(x.lb, y.ub), min=0, max=1)
+        ub = torch.clamp(numerical_stable(x.ub, y.lb), min=0, max=1)
+        return IntervalBoundedTensor(val, lb, ub)
+    elif isinstance(x, IntervalBoundedTensor) and isinstance(y, torch.Tensor):
+        val = numerical_stable(x.val, y)
+        lb = torch.clamp(numerical_stable(x.lb, y), min=0, max=1)
+        ub = torch.clamp(numerical_stable(x.ub, y), min=0, max=1)
+        return IntervalBoundedTensor(val, lb, ub)
+    elif isinstance(x, torch.Tensor) and isinstance(y, IntervalBoundedTensor):
+        val = numerical_stable(x, y.val)
+        lb = torch.clamp(numerical_stable(x, y.ub), min=0, max=1)
+        ub = torch.clamp(numerical_stable(x, y.lb), min=0, max=1)
+        return IntervalBoundedTensor(val, lb, ub)
+    else:
+        val = numerical_stable(x, y)
+        return IntervalBoundedTensor.point(val)
+
+
+def matmul(x1, x2, choose_ids=None):
+    """Matrix multiply for matrices (the general case)."""
+    if isinstance(x1, torch.Tensor) and isinstance(x2, torch.Tensor):
+        return torch.matmul(x1, x2)
+    elif isinstance(x1, IntervalBoundedTensor) and isinstance(x2, IntervalBoundedTensor):
+        ret_val = torch.matmul(x1.val, x2.val)
+        ret_lb = torch.matmul(torch.clamp(x1.lb, min=0), torch.clamp(x2.lb, min=0)) + \
+                 torch.matmul(torch.clamp(x1.ub, min=0), torch.clamp(x2.lb, max=0)) + \
+                 torch.matmul(torch.clamp(x1.lb, max=0), torch.clamp(x2.ub, min=0)) + \
+                 torch.matmul(torch.clamp(x1.ub, max=0), torch.clamp(x2.ub, max=0))
+        ret_ub = torch.matmul(torch.clamp(x1.ub, min=0), torch.clamp(x2.ub, min=0)) + \
+                 torch.matmul(torch.clamp(x1.lb, min=0), torch.clamp(x2.ub, max=0)) + \
+                 torch.matmul(torch.clamp(x1.ub, max=0), torch.clamp(x2.lb, min=0)) + \
+                 torch.matmul(torch.clamp(x1.lb, max=0), torch.clamp(x2.lb, max=0))
+        return IntervalBoundedTensor(ret_val, ret_lb, ret_ub)
+
+    elif isinstance(x1, IntervalBoundedTensor):
+        ret_val = torch.matmul(x1.val, x2)
+        # lower bound
+        # if x2 >= 0, which means x1.lb minimizes the results
+        # if x2 <= 0, which means x1.ub minimizes the results
+        ret_lb = torch.matmul(x1.lb, torch.clamp(x2, min=0)) + torch.matmul(x1.ub, torch.clamp(x2, max=0))
+        # if x2 >= 0, which means x1.ub maximizes the results
+        # if x2 <= 0, which means x1.lb maximizes the results
+        ret_ub = torch.matmul(x1.ub, torch.clamp(x2, min=0)) + torch.matmul(x1.lb, torch.clamp(x2, max=0))
+        return IntervalBoundedTensor(ret_val, ret_lb, ret_ub)
+    else:
+        ret_val = torch.matmul(x1, x2.val)
+        # lower bound
+        # if x1 >= 0, which means x2.lb minimizes the results
+        # if x1 <= 0, which means x2.ub minimizes the results
+        ret_lb = torch.matmul(torch.clamp(x1, min=0), x2.lb) + torch.matmul(torch.clamp(x1, max=0), x2.ub)
+        # if x1 >= 0, which means x2.ub maximizes the results
+        # if x1 <= 0, which means x2.lb maximizes the results
+        ret_ub = torch.matmul(torch.clamp(x1, min=0), x2.ub) + torch.matmul(torch.clamp(x1, max=0), x2.lb)
+        return IntervalBoundedTensor(ret_val, ret_lb, ret_ub)
+
+
+def softmax(x, dim: int):
+    if isinstance(x, torch.Tensor):
+        return torch.softmax(x, dim=dim)
+    val = torch.softmax(x, dim=dim)
+    exp_lb = torch.exp(x.lb - torch.max(x.ub, dim=dim, keepdim=True)[0])
+    exp_ub = torch.exp(x.ub - torch.max(x.ub, dim=dim, keepdim=True)[0])
+    multiplies = x.shape[dim]
+    # inputs: [l1, l2, l3], [u1, u2, u3]
+    # softmax_lb = [l1 / (l1 + u2 + u3), ...]
+    # softmax_ub = [u1 / (u1 + l2 + l3)]
+    ans_lb = exp_lb / torch.maximum((torch.sum(exp_ub * multiplies, dim=-1, keepdim=True) - exp_ub + exp_lb),
+                                    torch.full_like(exp_lb, 1e-10, device=exp_lb.device))
+    ans_lb = torch.maximum(ans_lb, torch.zeros_like(ans_lb))
+    ans_ub = exp_ub / torch.maximum((torch.sum(exp_lb * multiplies, dim=-1, keepdim=True) - exp_lb + exp_ub),
+                                    torch.full_like(exp_ub, 1e-10, device=exp_ub.device))
+    ans_ub = torch.minimum(ans_ub, torch.ones_like(ans_ub))
+    return IntervalBoundedTensor(val, ans_lb, ans_ub)
+
+
+if __name__ == "__main__":
+    # fix torch seeds
+    # torch.manual_seed(0)
+    batch_size = 10
+    seq_len = 2
+    d_model = 64
+    nhead = 2
+
+    x = torch.rand((batch_size, seq_len, d_model))
+    # x_interval = IntervalBoundedTensor.point(x)
+    x_interval = IntervalBoundedTensor(x, x - 0.01, x + 0.02)
+    lengths = torch.randint(1, seq_len + 1, (batch_size,))
+    # x_interval = None
+    model = Transformer(d_model, nhead, "[(Sub,2), (Ins,2)]")
+    model.eval()
+
+    # Forward pass
+    output1 = model(x, None, lengths=lengths)
+    print(output1)
+    output = model(x, x_interval, lengths=lengths)
+    # print(output.shape)
+    print(output)
+    print((output1 < output.ub + TOLERANCE).all() & (output1 > output.lb - TOLERANCE).all())

@@ -7,6 +7,7 @@ import sys
 
 import numpy as np
 import torch
+import tensorflow as tf
 
 from tqdm import tqdm
 
@@ -320,6 +321,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
     results['aug_acc'] = 100 * results['aug_correct'] / results['aug_total']
     out_str += ', augmented %d/%d = %.2f' % (
         results['aug_correct'], results['aug_total'], results['aug_acc'])
+  print(out_str)
   if adversary:
     adv_correct, adv_exs = adversary.run(model, dataset, device, opts=OPTS)
     results['num_adv_correct'] = sum(adv_correct)
@@ -334,10 +336,11 @@ def parse_args():
   parser = argparse.ArgumentParser()
   parser.add_argument('task', choices=TASK_CLASSES.keys())
   parser.add_argument('model', choices=['bow', 'cnn', 'lstm', 'decomp-attn', 'lstm-final-state', 'lstm-dp',
-                                        'lstm-dp-general', 'lstm-dp-ascc'])
+                                        'lstm-dp-general', 'lstm-dp-ascc', 'transformer'])
   parser.add_argument('out_dir', help='Directory to store and load output')
   # Model
   parser.add_argument('--hidden-size', '-d', type=int, default=100)
+  parser.add_argument('--head-num', type=int, default=2) # for transformer
   parser.add_argument('--kernel-size', '-k', type=int, default=3,
                       help='Kernel size, for CNN convolutions and pooling')
   parser.add_argument('--pool', choices=['max', 'mean', 'attn', 'final'], default='max')
@@ -438,11 +441,23 @@ def parse_args():
 def main():
   if OPTS.gpu_id is not None:
     os.environ["CUDA_VISIBLE_DEVICES"] = OPTS.gpu_id
+  gpus = tf.config.list_physical_devices('GPU')
+  if gpus:
+    try:
+      # Currently, memory growth needs to be the same across GPUs
+      for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+      logical_gpus = tf.config.list_logical_devices('GPU')
+      print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+    except RuntimeError as e:
+      # Memory growth must be set before GPUs have been initialized
+      print(e)
   random.seed(OPTS.rng_seed)
   np.random.seed(OPTS.rng_seed)
   torch.manual_seed(OPTS.torch_seed)
   torch.backends.cudnn.deterministic = True
   device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+  print(device)
   task_class = TASK_CLASSES[OPTS.task]
   print('Loading dataset.')
   if not os.path.exists(OPTS.out_dir):

@@ -39,7 +39,7 @@ class Vocabulary(object):
           vocab.add_word_hard(word)
           vecs.append(np.array([float(x) for x in toks[1:]]))
     print('Found %d/%d words in %s' % (found, len(word_set), fn))
-    word_mat = torch.tensor(vecs, dtype=torch.float, device=device)
+    word_mat = torch.tensor(np.array(vecs), dtype=torch.float, device=device)
     if normalize:
         word_mat = word_mat / word_mat.norm(dim=-1, keepdim=True)
     return vocab, word_mat
