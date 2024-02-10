@@ -453,7 +453,7 @@ class MultiheadAttention(nn.Module):
         self.v_linear = Linear(embed_dim, embed_dim)
         self.dropout = Dropout(dropout)
 
-    def project(self, z):
+    def project(self, z, batch_size, seq_len):
         q = self.q_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_linear(z).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -471,14 +471,16 @@ class MultiheadAttention(nn.Module):
             v = self.v_linear(z).view(-1, batch_size, seq_len, self.num_heads, self.head_dim).transpose(-3, -2)
             return q, k, v
 
-        c = torch.Tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
+        c = torch.tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
         bottom_f = IntervalBoundedTensor.bottom((batch_size, self.num_heads, self.head_dim), self.device)
         bottom_psum = IntervalBoundedTensor.bottom((batch_size, self.num_heads, 1), self.device)
 
-        def compute(pre: IntervalBoundedTensor, x, exponent, cur):
+        def compute(pre: IntervalBoundedTensor, x, exponent, cur, add_mask=None):
             mask = pre.is_bottom().any(dim=-1, keepdim=True). \
                 any(dim=-2, keepdim=True). \
                 any(dim=-3, keepdim=True)
+            if add_mask is not None:
+                mask = mask | add_mask
             y = mul(exponent, c).unsqueeze(-1)
             pre = transform(pre, cur, x, y)
             # compute x = log(e^x + e^y), numerical stable
@@ -510,7 +512,7 @@ class MultiheadAttention(nn.Module):
 
         output = IntervalBoundedTensor.bottom((batch_size, model_dim), self.device)
         for f_ins in range(self.Ins_delta + 1):  # the final delta for Ins
-            for is_end_interval in range(2):
+            for is_end_interval in range(0, max(2, self.Sub_delta + 1)):
                 if is_end_interval:
                     q_end = q_interval[f_ins, torch.arange(batch_size), :, lengths - 1, :]
                 else:
@@ -538,7 +540,7 @@ class MultiheadAttention(nn.Module):
                             cur_ins_t_1 = compute(f_ins_special_pre[j - 1], psum_ins_special_pre[j - 1],
                                                   sum(mul(q_end, k[j, :, :, i - j, :]), -1),
                                                   v[j, :, :, i - j, :])
-                            cur_ins_t = merge(cur_ins_t, cur_ins_t_1) if cur_ins_t is not None else None
+                            cur_ins_t = merge(cur_ins_t, cur_ins_t_1) if cur_ins_t is not None else cur_ins_t_1
                         # Case 1.3: f[i-1][j] -> f_special[i][j], first time
                         if j < f_ins and i >= j * 2 and i - j < seq_len:
                             cur_ins_t_special = compute(f[j], psum[j],
@@ -573,19 +575,18 @@ class MultiheadAttention(nn.Module):
                         # Case 2.1: not sub
                         slc2 = torch.clamp(i - torch.arange(f_ins + 1), max=seq_len - 1, min=0)
                         slc1 = torch.arange(f_ins + 1)
-                        if i < seq_len + f_ins - 1 or not is_end_interval:
-                            cur_sub_t = compute(f[:, j], psum[:, j],
-                                                sum(mul(q_end,
-                                                        k[slc1, :, :, slc2, :]), -1),
-                                                v[slc1, :, :, slc2, :])
-                        else:
-                            cur_sub_t = None
+                        is_end = (lengths == i - f_ins + 1).view(-1, 1, 1)
+                        cur_sub_t = compute(f[:, j], psum[:, j],
+                                            sum(mul(q_end,
+                                                    k[slc1, :, :, slc2, :]), -1),
+                                            v[slc1, :, :, slc2, :], add_mask=is_end & (is_end_interval > 0))
 
                         # Case 2.2: sub
-                        if j > 0 and (i < seq_len + f_ins - 1 or is_end_interval):
+                        if j > 0:
                             cur_sub_t_1 = compute(f[:, j - 1], psum[:, j - 1],
                                                   sum(mul(q_end, k_interval[slc1, :, :, slc2, :]), -1),
-                                                  v_interval[slc1, :, :, slc2, :])
+                                                  v_interval[slc1, :, :, slc2, :],
+                                                  add_mask=is_end & (is_end_interval == 0))
                             cur_sub_t = merge(cur_sub_t, cur_sub_t_1) if cur_sub_t is not None else None
 
                         if cur_sub_t is not None:
@@ -602,8 +603,8 @@ class MultiheadAttention(nn.Module):
                     f, psum = merge(cur_ins, cur_sub)
 
                     for j in range(is_end_interval, self.Sub_delta + 1):
-                        mask = f[f_ins, j].is_bottom().any()
-                        output = where(((lengths - 1 == i + f_ins) & ~mask).unsqueeze(-1),
+                        mask = f[f_ins, j].is_bottom().any(dim=-1).any(dim=-1)
+                        output = where(((lengths == i - f_ins + 1) & ~mask).unsqueeze(-1),
                                        output.merge(add(self.dropout(f[f_ins, j].view(batch_size, -1)),
                                                         x[f_ins, torch.arange(batch_size), lengths - 1])),
                                        output)
@@ -612,15 +613,15 @@ class MultiheadAttention(nn.Module):
 
     def forward(self, x, pe, mask=None, lengths=None):
         batch_size, seq_len, _ = x.size()
-        x += pe
+        x = x + pe
         # Linear projections
-        query, key, value = self.project(x)
+        query, key, value = self.project(x, batch_size, seq_len)
 
         # Scaled dot-product attention
-        c = torch.Tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
+        c = torch.tensor([1.0 / math.sqrt(self.head_dim)], device=self.device)
         scores = matmul(query, key.transpose(-2, -1)) * c
 
-        attn_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.uint8))
+        attn_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.uint8, device=self.device))
         attn_mask = attn_mask.unsqueeze(0).unsqueeze(1)  # Add batch and head dimensions
         scores = scores.masked_fill(attn_mask == 0, float('-inf'))
 
@@ -659,7 +660,11 @@ class Transformer(nn.Module):
         self.device = device
 
     def forward(self, z, z_interval, mask=None, unk_mask=None, lengths=None):
-        c = torch.Tensor([math.sqrt(self.d_model)], device=self.device)
+        if z_interval is not None:
+            # torch.save(z, 'z.pt')
+            # torch.save(z_interval, 'z_interval.pt')
+            lengths = lengths - self.transformer.Ins_delta
+        c = torch.tensor([math.sqrt(self.d_model)], device=self.device)
         z = z * c
         if z_interval is None:
             pe = self.pos_encoder.pe[:, :z.size(1)].to(self.device)
@@ -1921,24 +1926,43 @@ def softmax(x, dim: int):
 
 if __name__ == "__main__":
     # fix torch seeds
-    # torch.manual_seed(0)
-    batch_size = 10
-    seq_len = 2
-    d_model = 64
-    nhead = 2
+    for _ in range(100):
+        torch.manual_seed(_)
+        np.random.seed(_)
+        # torch.manual_seed(12)
+        # np.random.seed(12)
+        batch_size = 1
+        seq_len = 20
+        d_model = 2
+        nhead = 2
 
-    x = torch.rand((batch_size, seq_len, d_model))
-    # x_interval = IntervalBoundedTensor.point(x)
-    x_interval = IntervalBoundedTensor(x, x - 0.01, x + 0.02)
-    lengths = torch.randint(1, seq_len + 1, (batch_size,))
-    # x_interval = None
-    model = Transformer(d_model, nhead, "[(Sub,2), (Ins,2)]")
-    model.eval()
+        x = torch.rand((batch_size, seq_len, d_model))
+        # x_interval = IntervalBoundedTensor.point(x)
+        x_interval = IntervalBoundedTensor(x, x - 0.01, x + 0.02)
+        lengths = torch.randint(6, seq_len + 1, (batch_size,))
+        # x_interval = None
+        # x = torch.load("z.pt")
+        # x_interval = torch.load("z_interval.pt")
+        # x_interval = IntervalBoundedTensor(x_interval.val, x_interval.lb, x_interval.ub)
+        model = Transformer(d_model, nhead, "[(Sub, 2), (Ins,2)]")
+        model.eval()
 
-    # Forward pass
-    output1 = model(x, None, lengths=lengths)
-    print(output1)
-    output = model(x, x_interval, lengths=lengths)
-    # print(output.shape)
-    print(output)
-    print((output1 < output.ub + TOLERANCE).all() & (output1 > output.lb - TOLERANCE).all())
+        # Forward pass
+        # lengths = torch.tensor([14]).long()
+        # x1 = torch.cat([x[:, :1], x[:, :5], x[:, 4:12]], dim=1)
+        # x1[:, 7] = (x_interval.ub[:, 5] - x_interval.lb[:, 5]) * torch.rand(1) + x_interval.lb[:, 5]
+        pre_length = lengths[0].item() - 2
+        pos = sorted(np.random.choice(pre_length, 4, replace=False))
+        x1 = torch.cat([x[:, :pos[0] + 1], x[:, pos[0]:pos[2] + 1], x[:, pos[2]:pre_length]], dim=1)
+        x1[:, pos[1] + 1] = (x_interval.ub[:, pos[1]] - x_interval.lb[:, pos[1]]) * torch.rand(
+            x_interval.lb[:, pos[1]].shape) + x_interval.lb[:, pos[1]]
+        x1[:, pos[3] + 2] = (x_interval.ub[:, pos[3]] - x_interval.lb[:, pos[3]]) * torch.rand(
+            x_interval.lb[:, pos[3]].shape) + x_interval.lb[:, pos[3]]
+        output1 = model(x1, None, lengths=lengths)
+        print(output1)
+        # lengths = torch.tensor([14]).long()
+        output = model(x, x_interval, lengths=lengths)
+        # print(output.shape)
+        print(output)
+        print(_)
+        assert (output1 < output.ub + TOLERANCE).all().item() and (output1 > output.lb - TOLERANCE).all().item()

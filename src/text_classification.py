@@ -330,7 +330,7 @@ class TransformerModel(AdversarialModel):
         self.device = device
         self.embs = ibp.Embedding.from_pretrained(word_mat)
         self.linear_input = ibp.Linear(word_vec_size, d_hidden)
-        self.transformer = ibp.Transformer(d_hidden, d_head, perturbation)
+        self.transformer = ibp.Transformer(d_hidden, d_head, perturbation, device=device)
         self.dropout = ibp.Dropout(dropout)
         self.fc_hidden = ibp.Linear(d_hidden, d_hidden)
         self.fc_output = ibp.Linear(d_hidden, 1)
@@ -1106,7 +1106,7 @@ class ExhaustiveAdversary(Adversary):
                 x, dataset.vocab, device, return_bounds=True,
                 attack_surface=self.attack_surface, perturbation=self.perturbation, truncate_to=opts.truncate_to)
             orig_pred = model.query(x, dataset.vocab, device, return_bounds=False)
-            assert orig_lb - 1e-5 <= orig_pred <= orig_ub + 1e-5
+            assert orig_lb - ibp.TOLERANCE <= orig_pred <= orig_ub + ibp.TOLERANCE, (orig_lb, orig_pred, orig_ub)
             cert_correct = (orig_lb * (2 * y - 1) > 0) and (orig_ub * (2 * y - 1) > 0)
             print('Logit bounds: %.6f <= %.6f <= %.6f, cert_correct=%s' % (
                 orig_lb, orig_pred, orig_ub, cert_correct))
