@@ -1814,8 +1814,8 @@ def transform(pre, cur, x, y):
 def numerical_stable(x, y):
     # compute e^x / (e^x + e^y)
     # numerical stable version
-    # e^x / (e^x + e^y) = 1 / (1 + e^(y - x))
-    return 1 / (1 + torch.exp(y - x))
+    # e^x / (e^x + e^y) = 1 / (1 + e^(-(x - y)))
+    return torch.sigmoid(x - y)
 
 
 def numerical_stable_log(x, y):
@@ -1864,7 +1864,7 @@ def get_theta(x, y):
         return IntervalBoundedTensor(val, lb, ub)
     else:
         val = numerical_stable(x, y)
-        return IntervalBoundedTensor.point(val)
+        return val
 
 
 def matmul(x1, x2, choose_ids=None):
