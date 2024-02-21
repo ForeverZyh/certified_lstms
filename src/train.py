@@ -126,8 +126,8 @@ def train(task_class, model, train_data, num_epochs, lr, device, dev_data=None,
   else:
     attack = None
     victim_model = None
-  pre_best = -1
-  for t in range(num_epochs):
+  pre_best = OPTS.resume - 1
+  for t in range(OPTS.resume, num_epochs):
     model.train()
     if t < non_cert_train_epochs:
         cur_cert_frac = 0.0
@@ -302,6 +302,7 @@ def test(task_class, model, name, dataset, device, show_certified=False, batch_s
       results["num_correct"] += num_correct
       results["num_cert_correct"] += num_cert_correct
       results['num_total'] += len(batch['y'])
+      break
     if aug_dataset:
       results['aug_loss'] = results['loss']
       results['aug_total'] = results['num_total']
@@ -427,6 +428,7 @@ def parse_args():
   parser.add_argument('--load-dir', '-L', help='Where to load checkpoint')
   parser.add_argument('--load-ckpt', type=int, default=None,
                       help='Which checkpoint to load')
+  parser.add_argument("--resume", type=int, default=0, help='which epoch to resume')
   # Other
   parser.add_argument('--rng-seed', type=int, default=123456)
   parser.add_argument('--torch-seed', type=int, default=1234567)

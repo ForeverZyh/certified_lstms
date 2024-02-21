@@ -512,7 +512,7 @@ class MultiheadAttention(nn.Module):
 
         output = IntervalBoundedTensor.bottom((batch_size, model_dim), self.device)
         for f_ins in range(self.Ins_delta + 1):  # the final delta for Ins
-            for is_end_interval in range(0, max(2, self.Sub_delta + 1)):
+            for is_end_interval in range(0, min(2, self.Sub_delta + 1)):
                 if is_end_interval:
                     q_end = q_interval[f_ins, torch.arange(batch_size), :, lengths - 1, :]
                 else:
@@ -523,6 +523,8 @@ class MultiheadAttention(nn.Module):
                 psum.val[0, 0] = psum.lb[0, 0] = psum.ub[0, 0] = torch.ones_like(psum[0, 0].val) * (-1e16)
                 f_ins_special_pre, psum_ins_special_pre = init_f_psum(f_ins)
                 for i in range(seq_len + f_ins):
+                    if i >= lengths.max().detach().cpu().numpy() + f_ins:
+                        break
                     cur_ins = None
                     cur_ins_special = None
                     cur_sub = None
@@ -587,7 +589,7 @@ class MultiheadAttention(nn.Module):
                                                   sum(mul(q_end, k_interval[slc1, :, :, slc2, :]), -1),
                                                   v_interval[slc1, :, :, slc2, :],
                                                   add_mask=is_end & (is_end_interval == 0))
-                            cur_sub_t = merge(cur_sub_t, cur_sub_t_1) if cur_sub_t is not None else None
+                            cur_sub_t = merge(cur_sub_t, cur_sub_t_1) if cur_sub_t is not None else cur_sub_t_1
 
                         if cur_sub_t is not None:
                             cur_sub_t = cur_sub_t[0].unsqueeze(1), cur_sub_t[1].unsqueeze(1)
@@ -604,9 +606,13 @@ class MultiheadAttention(nn.Module):
 
                     for j in range(is_end_interval, self.Sub_delta + 1):
                         mask = f[f_ins, j].is_bottom().any(dim=-1).any(dim=-1)
+                        if is_end_interval:
+                            add_x = interval_x[f_ins, torch.arange(batch_size), lengths - 1]
+                        else:
+                            add_x = x[f_ins, torch.arange(batch_size), lengths - 1]
                         output = where(((lengths == i - f_ins + 1) & ~mask).unsqueeze(-1),
                                        output.merge(add(self.dropout(f[f_ins, j].view(batch_size, -1)),
-                                                        x[f_ins, torch.arange(batch_size), lengths - 1])),
+                                                        add_x)),
                                        output)
 
         return output
@@ -1927,10 +1933,9 @@ def softmax(x, dim: int):
 if __name__ == "__main__":
     # fix torch seeds
     for _ in range(100):
+        # _ = 11
         torch.manual_seed(_)
         np.random.seed(_)
-        # torch.manual_seed(12)
-        # np.random.seed(12)
         batch_size = 1
         seq_len = 20
         d_model = 2
@@ -1944,19 +1949,20 @@ if __name__ == "__main__":
         # x = torch.load("z.pt")
         # x_interval = torch.load("z_interval.pt")
         # x_interval = IntervalBoundedTensor(x_interval.val, x_interval.lb, x_interval.ub)
-        model = Transformer(d_model, nhead, "[(Sub, 2), (Ins,2)]")
+        model = Transformer(d_model, nhead, "[(Sub, 2)]")
         model.eval()
 
         # Forward pass
         # lengths = torch.tensor([14]).long()
         # x1 = torch.cat([x[:, :1], x[:, :5], x[:, 4:12]], dim=1)
         # x1[:, 7] = (x_interval.ub[:, 5] - x_interval.lb[:, 5]) * torch.rand(1) + x_interval.lb[:, 5]
-        pre_length = lengths[0].item() - 2
+        pre_length = lengths[0].item()
         pos = sorted(np.random.choice(pre_length, 4, replace=False))
-        x1 = torch.cat([x[:, :pos[0] + 1], x[:, pos[0]:pos[2] + 1], x[:, pos[2]:pre_length]], dim=1)
-        x1[:, pos[1] + 1] = (x_interval.ub[:, pos[1]] - x_interval.lb[:, pos[1]]) * torch.rand(
+        # x1 = torch.cat([x[:, :pos[0] + 1], x[:, pos[0]:pos[2] + 1], x[:, pos[2]:pre_length]], dim=1)
+        x1 = x.clone()
+        x1[:, pos[1]] = (x_interval.ub[:, pos[1]] - x_interval.lb[:, pos[1]]) * torch.rand(
             x_interval.lb[:, pos[1]].shape) + x_interval.lb[:, pos[1]]
-        x1[:, pos[3] + 2] = (x_interval.ub[:, pos[3]] - x_interval.lb[:, pos[3]]) * torch.rand(
+        x1[:, pos[3]] = (x_interval.ub[:, pos[3]] - x_interval.lb[:, pos[3]]) * torch.rand(
             x_interval.lb[:, pos[3]].shape) + x_interval.lb[:, pos[3]]
         output1 = model(x1, None, lengths=lengths)
         print(output1)
